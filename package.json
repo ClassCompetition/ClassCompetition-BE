@@ -1,0 +1,32 @@
+{
+  "name": "classcompetition-be",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ClassCompetition/ClassCompetition-BE.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/ClassCompetition/ClassCompetition-BE/issues"
+  },
+  "homepage": "https://github.com/ClassCompetition/ClassCompetition-BE#readme",
+  "dependencies": {
+    "@prisma/client": "5.19.1",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "mysql2": "^3.16.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.11",
+    "prisma": "5.19.1"
+  }
+}

@@ -1,0 +1,89 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// 1. 유저
+model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  nickname  String
+  studentId String
+  point     Int      @default(0)
+  
+  teamMembers TeamMember[]
+  bets        Bet[]
+}
+
+// 2. 팀
+model Team {
+  id        Int      @id @default(autoincrement())
+  name      String
+  sportType String
+  ownerId   Int
+  
+  members   TeamMember[]
+  tactics   Tactic[]
+  
+  homeMatches Match[] @relation("TeamA")
+  awayMatches Match[] @relation("TeamB")
+}
+
+// 3. 팀 멤버
+model TeamMember {
+  id      Int    @id @default(autoincrement())
+  userId  Int
+  teamId  Int
+  role    String 
+  status  String 
+
+  user    User @relation(fields: [userId], references: [id])
+  team    Team @relation(fields: [teamId], references: [id])
+}
+
+// 4. 전술
+model Tactic {
+  id        Int      @id @default(autoincrement())
+  teamId    Int
+  title     String
+  isPrivate Boolean  @default(true)
+  data      Json
+  
+  team      Team     @relation(fields: [teamId], references: [id])
+}
+
+// 5. 경기
+model Match {
+  id           Int      @id @default(autoincrement())
+  tournamentId Int
+  round        Int
+  teamAId      Int?
+  teamBId      Int?
+  scoreA       Int      @default(0)
+  scoreB       Int      @default(0)
+  status       String
+  winnerId     Int?
+  nextMatchId  Int?
+
+  teamA        Team?    @relation("TeamA", fields: [teamAId], references: [id])
+  teamB        Team?    @relation("TeamB", fields: [teamBId], references: [id])
+  bets         Bet[]
+}
+
+// 6. 배팅
+model Bet {
+  id           Int @id @default(autoincrement())
+  userId       Int
+  matchId      Int
+  targetTeamId Int
+  amount       Int
+
+  user      User  @relation(fields: [userId], references: [id])
+  match     Match @relation(fields: [matchId], references: [id])
+}
