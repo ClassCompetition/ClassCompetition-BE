@@ -141,7 +141,8 @@ model TeamJoinRequest {
 model Tournament {
   id          Int       @id @default(autoincrement())
   name        String
-  sport       String
+  sport       String    // 'LoL', 'Soccer' (표기용)
+  sportType   String    @default("lol") @map("sport_type") // 'lol', 'soccer' (로직용)
   status      String    // 'UPCOMING', 'ONGOING', 'ENDED'
   isPrivate   Boolean   @default(false) @map("is_private")
   inviteCode  String?   @map("invite_code")
@@ -153,7 +154,10 @@ model Tournament {
   
   // 기존 로직 호환을 위해 유지 (명세서에는 없지만 필요시 사용)
   format       String   @default("TOURNAMENT") // "TOURNAMENT", "LEAGUE", "HYBRID"
-  playoffTeams Int?     @map("playoff_teams")  // 하이브리드 시 본선 진출 팀 수 (예: 4) 
+  playoffTeams Int?     @map("playoff_teams")  // 하이브리드 시 본선 진출 팀 수 (예: 4)
+  
+  // ⭐ 대진표 생성 방식
+  bracketGeneration String? @map("bracket_generation") // 'random' | 'manual' 
 
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
