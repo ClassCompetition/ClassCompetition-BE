@@ -141,3 +141,72 @@ exports.getMe = async (req, res) => {
     res.status(500).json({ success: false, error: { code: "SERVER_ERROR", message: "서버 오류" } });
   }
 };
+
+// ==========================================
+// 4. 소셜 로그인 (POST /api/auth/social-login)
+// ==========================================
+exports.socialLogin = async (req, res) => {
+  const { email, name, provider, providerId } = req.body; 
+  // provider: 'kakao' | 'google'
+
+  try {
+    // 1. 해당 소셜 ID로 가입된 유저가 있는지 확인
+    let user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { kakaoId: provider === 'kakao' ? providerId : undefined },
+          { googleId: provider === 'google' ? providerId : undefined },
+          { email: email } // 이메일로도 찾기 (계정 연동)
+        ]
+      }
+    });
+
+    // 2. 없으면 회원가입 (자동)
+    if (!user) {
+      // 닉네임 중복 방지 (랜덤 숫자 추가)
+      const randomSuffix = Math.floor(Math.random() * 10000);
+      const nickname = `${name}_${randomSuffix}`;
+
+      user = await prisma.user.create({
+        data: {
+          email,
+          name,
+          nickname,
+          points: 1000,
+          // 소셜 ID 저장
+          kakaoId: provider === 'kakao' ? providerId : null,
+          googleId: provider === 'google' ? providerId : null,
+          // 소셜 유저는 비밀번호가 없음
+        }
+      });
+    } else {
+      // 3. 이미 가입된 유저라면 소셜 ID 업데이트 (연동)
+      if (provider === 'kakao' && !user.kakaoId) {
+        await prisma.user.update({ where: { id: user.id }, data: { kakaoId: providerId } });
+      } else if (provider === 'google' && !user.googleId) {
+        await prisma.user.update({ where: { id: user.id }, data: { googleId: providerId } });
+      }
+    }
+
+    // 4. 토큰 발급
+    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '1d' });
+
+    res.json({
+      success: true,
+      data: {
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          points: user.points,
+          avatarUrl: user.avatarUrl
+        },
+        token
+      }
+    });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: { message: "소셜 로그인 실패" } });
+  }
+};
