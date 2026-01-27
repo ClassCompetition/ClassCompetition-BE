@@ -102,52 +102,35 @@ exports.getTeamDetail = async (req, res) => {
       where: { id: parseInt(id) },
       include: {
         members: {
-          include: { user: { select: { id: true, name: true, avatarUrl: true } } }
+          include: { user: { select: { id: true, name: true, avatarUrl: true, email: true } } }
         },
+        // ⭐️ 리더인 경우에만 가입 신청 목록(joinRequests)을 가져옴
         joinRequests: {
-          where: { status: 'pending' }, // 대기 중인 요청만
-          include: { user: { select: { id: true, name: true } } }
+          include: { user: { select: { id: true, name: true, avatarUrl: true } } }
         }
       }
     });
 
-    if (!team) return res.status(404).json({ success: false, error: { message: "팀 없음" } });
+    if (!team) return res.status(404).json({ success: false, error: { message: "팀을 찾을 수 없습니다." } });
 
-    // 현재 접속자의 역할 확인
-    const myMembership = team.members.find(m => m.userId === userId);
-    const currentUserRole = myMembership ? myMembership.role : null;
+    // 현재 유저의 역할 확인 (leader, member, none)
+    const membership = team.members.find(m => m.userId === userId);
+    const currentUserRole = team.leaderId === userId ? 'leader' : (membership ? 'member' : 'none');
 
-    // 응답 데이터 구성
-    const responseData = {
-      id: team.id,
-      name: team.name,
-      sport: team.sport,
-      sportType: team.sportType,
-      inviteCode: team.inviteCode,
-      description: team.description,
-      wins: team.wins,
-      losses: team.losses,
-      currentUserRole,
-      members: team.members.map(m => ({
-        id: m.id,
-        userId: m.user.id,
-        name: m.user.name,
-        avatarUrl: m.user.avatarUrl,
-        role: m.role,
-        position: m.position,
-        joinedAt: m.joinedAt
-      })),
-      // 팀장일 때만 가입 신청 목록 보임
-      pendingRequests: currentUserRole === 'leader' ? team.joinRequests.map(r => ({
-        id: r.id,
-        userId: r.user.id,
-        name: r.user.name,
-        position: r.position,
-        appliedAt: r.appliedAt
-      })) : []
-    };
+    // 리더가 아니면 joinRequests 정보는 숨김 (보안)
+    if (currentUserRole !== 'leader') {
+      delete team.joinRequests;
+    }
 
-    res.json({ success: true, data: responseData });
+    res.json({
+      success: true,
+      data: {
+        ...team,
+        currentUserRole,
+        memberCount: team.members.length,
+        pendingRequests: team.joinRequests || [] // 프론트엔드 호환용 필드명
+      }
+    });
 
   } catch (error) {
     console.error(error);
@@ -269,5 +252,153 @@ exports.rejectRequest = async (req, res) => {
 
   } catch (error) {
     res.status(500).json({ success: false, error: { message: "거절 처리 실패" } });
+  }
+};
+
+// ==========================================
+// 7. 초대 코드로 팀 검색 (GET /api/teams/seek)
+// ==========================================
+exports.seekTeam = async (req, res) => {
+  const { inviteCode } = req.query;
+
+  try {
+    if (!inviteCode) {
+      return res.status(400).json({ success: false, error: { message: "초대 코드를 입력해주세요." } });
+    }
+
+    // 팀 조회 (리더 정보와 멤버 수 포함)
+    const team = await prisma.team.findUnique({
+      where: { inviteCode: inviteCode.toUpperCase() },
+      include: {
+        members: {
+          where: { role: 'leader' },
+          include: { user: { select: { name: true } } }
+        },
+        _count: { select: { members: true } }
+      }
+    });
+
+    if (!team) {
+      return res.status(404).json({ success: false, error: { message: "해당 코드의 팀을 찾을 수 없습니다." } });
+    }
+
+    const leaderName = team.members[0]?.user.name || '알 수 없음';
+
+    res.json({
+      success: true,
+      data: {
+        id: team.id,
+        name: team.name,
+        sport: team.sport,
+        sportType: team.sportType, // 프론트엔드 아이콘 매핑용
+        description: team.description,
+        members: team._count.members,
+        maxMembers: 50, // 임시 고정값 (또는 DB에 필드 추가 필요)
+        leader: leaderName
+      }
+    });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: { message: "팀 검색 실패" } });
+  }
+};
+
+// ==========================================
+// 8. 팀 가입 신청 (POST /api/teams/join)
+// ==========================================
+exports.joinTeam = async (req, res) => {
+  const { inviteCode, position, introduction } = req.body;
+  const userId = req.userId;
+
+  try {
+    // 1. 팀 찾기
+    const team = await prisma.team.findUnique({ where: { inviteCode } });
+    if (!team) return res.status(404).json({ message: "유효하지 않은 초대 코드입니다." });
+
+    // 2. 이미 멤버인지 확인
+    const existingMember = await prisma.teamMember.findFirst({
+      where: { teamId: team.id, userId }
+    });
+    if (existingMember) return res.status(400).json({ message: "이미 가입된 팀입니다." });
+
+    // 3. 이미 신청했는지 확인
+    const existingRequest = await prisma.joinRequest.findFirst({
+      where: { teamId: team.id, userId }
+    });
+    if (existingRequest) return res.status(400).json({ message: "이미 가입 신청을 보냈습니다." });
+
+    // 4. 신청 생성
+    await prisma.joinRequest.create({
+      data: {
+        teamId: team.id,
+        userId,
+        position,
+        introduction
+      }
+    });
+
+    res.json({ success: true, message: "가입 신청이 완료되었습니다." });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: { message: "가입 신청 실패" } });
+  }
+};
+
+// ==========================================
+// 9. 가입 승인 (POST /api/teams/:id/approve/:requestId)
+// ==========================================
+exports.approveRequest = async (req, res) => {
+  const { id, requestId } = req.params;
+  const userId = req.userId;
+
+  try {
+    // 권한 체크 (리더만 가능)
+    const team = await prisma.team.findUnique({ where: { id: parseInt(id) } });
+    if (team.leaderId !== userId) return res.status(403).json({ message: "권한이 없습니다." });
+
+    // 신청 정보 가져오기
+    const request = await prisma.joinRequest.findUnique({ where: { id: parseInt(requestId) } });
+    if (!request) return res.status(404).json({ message: "신청 내역이 없습니다." });
+
+    // 트랜잭션: 멤버 추가 + 신청 내역 삭제
+    await prisma.$transaction([
+      prisma.teamMember.create({
+        data: {
+          teamId: team.id,
+          userId: request.userId,
+          role: 'member',
+          position: request.position
+        }
+      }),
+      prisma.joinRequest.delete({ where: { id: parseInt(requestId) } })
+    ]);
+
+    res.json({ success: true, message: "승인되었습니다." });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: { message: "승인 실패" } });
+  }
+};
+
+// ==========================================
+// 10. 가입 거절 (POST /api/teams/:id/reject/:requestId)
+// ==========================================
+exports.rejectRequest = async (req, res) => {
+  const { id, requestId } = req.params;
+  const userId = req.userId;
+
+  try {
+    const team = await prisma.team.findUnique({ where: { id: parseInt(id) } });
+    if (team.leaderId !== userId) return res.status(403).json({ message: "권한이 없습니다." });
+
+    await prisma.joinRequest.delete({ where: { id: parseInt(requestId) } });
+
+    res.json({ success: true, message: "거절되었습니다." });
+
+  } catch (error) {
+    res.status(500).json({ success: false, error: { message: "거절 실패" } });
   }
 };

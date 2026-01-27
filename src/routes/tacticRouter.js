@@ -4,13 +4,17 @@ const router = express.Router();
 const tacticController = require('../controllers/tacticController');
 const { verifyToken } = require('../middlewares/authMiddleware');
 
-// 조회는 로그인 없이 가능하게 할 수도 있지만, 명세서상 인증 권장
+// ⭐️ 모든 전술 관련 기능(조회 포함)은 로그인이 필요합니다.
+// 컨트롤러에서 req.userId를 사용하기 때문입니다.
+router.use(verifyToken); 
+
+// 전술 목록 조회 & 상세 조회
 router.get('/', tacticController.getTactics);
 router.get('/:id', tacticController.getTacticDetail);
 
-// 생성/수정/삭제는 인증 필수
-router.post('/', verifyToken, tacticController.createTactic);
-router.put('/:id', verifyToken, tacticController.updateTactic);
-router.delete('/:id', verifyToken, tacticController.deleteTactic);
+// 전술 생성, 수정, 삭제
+router.post('/', tacticController.createTactic);
+router.put('/:id', tacticController.updateTactic);
+router.delete('/:id', tacticController.deleteTactic);
 
 module.exports = router;

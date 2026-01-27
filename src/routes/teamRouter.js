@@ -15,6 +15,7 @@ router.post('/join', teamController.joinTeam);
 
 // 3. 팀 상세 및 관리
 router.get('/:id', teamController.getTeamDetail);
+router.get('/seek', teamController.seekTeam);
 
 // 4. 가입 신청 승인/거절 (팀장 전용)
 router.post('/:id/requests/:requestId/approve', teamController.approveRequest);
