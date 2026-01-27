@@ -202,10 +202,17 @@ exports.joinTournament = async (req, res) => {
     }
 
     await prisma.tournamentTeam.create({
-      data: { tournamentId: parseInt(id), teamId: parseInt(teamId) },
+      data: {
+        tournamentId: parseInt(id),
+        teamId: parseInt(teamId),
+        status: "PENDING", // ⭐️ 기본 상태: 승인 대기
+      },
     });
 
-    res.json({ success: true, message: "참가 신청 완료" });
+    res.json({
+      success: true,
+      message: "참가 신청이 완료되었습니다. 관리자 승인 후 참가가 확정됩니다.",
+    });
   } catch (error) {
     console.error(error);
     res
@@ -224,7 +231,11 @@ exports.startTournament = async (req, res) => {
   try {
     const tournament = await prisma.tournament.findUnique({
       where: { id: parseInt(id) },
-      include: { participatingTeams: true },
+      include: {
+        participatingTeams: {
+          where: { status: "APPROVED" }, // ⭐️ 승인된 팀만 포함
+        },
+      },
     });
 
     // 권한 및 상태 체크
@@ -407,29 +418,104 @@ exports.getBracket = async (req, res) => {
 // ==========================================
 exports.getParticipants = async (req, res) => {
   const { id } = req.params;
+  const { status } = req.query; // 'APPROVED', 'PENDING', 'ALL'
 
   try {
-    const participants = await prisma.participatingTeam.findMany({
-      where: { tournamentId: parseInt(id) },
+    const whereCondition = { tournamentId: parseInt(id) };
+    if (status && status !== "ALL") {
+      whereCondition.status = status;
+    } else if (!status) {
+      whereCondition.status = "APPROVED"; // 기본값: 승인된 팀만
+    }
+
+    const participants = await prisma.tournamentTeam.findMany({
+      where: whereCondition,
       include: {
         team: {
           select: {
             id: true,
             name: true,
-            logo: true,
             sport: true,
+            sportType: true,
+            wins: true,
+            losses: true,
+            description: true,
+            representativeTacticId: true,
+            members: {
+              select: {
+                id: true,
+                userId: true,
+                role: true,
+                position: true,
+                user: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
+                },
+              },
+            },
           },
         },
       },
     });
 
-    const teams = participants.map((p) => p.team);
+    // 프론트엔드에서 상태를 알 수 있도록 status 포함
+    const teams = participants.map((p) => ({
+      ...p.team,
+      joinStatus: p.status, // PENDING, APPROVED, REJECTED
+      requestId: p.id, // 승인/거절 처리를 위해 필요할 수 있음 (사실 composite key라 tournamentId, teamId로 가능하지만 id가 있다면 편함)
+    }));
+
     res.json({ success: true, data: teams });
   } catch (error) {
     console.error(error);
     res
       .status(500)
       .json({ success: false, error: { message: "참가 팀 조회 실패" } });
+  }
+};
+
+// ==========================================
+// 참가 승인/거절 처리 (NEW)
+// ==========================================
+exports.processTournamentRequest = async (req, res) => {
+  const { id } = req.params; // tournamentId
+  const { teamId, action } = req.body; // action: 'APPROVE' | 'REJECT'
+  const managerId = req.userId;
+
+  try {
+    // 1. 권한 확인
+    const tournament = await prisma.tournament.findUnique({
+      where: { id: parseInt(id) },
+    });
+
+    if (!tournament) return res.status(404).json({ message: "대회 없음" });
+    if (tournament.managerId !== managerId)
+      return res.status(403).json({ message: "관리자 권한 필요" });
+
+    // 2. 상태 업데이트
+    const status = action === "APPROVE" ? "APPROVED" : "REJECTED";
+
+    await prisma.tournamentTeam.update({
+      where: {
+        tournamentId_teamId: {
+          tournamentId: parseInt(id),
+          teamId: parseInt(teamId),
+        },
+      },
+      data: { status },
+    });
+
+    res.json({
+      success: true,
+      message: `참가 신청이 ${status === "APPROVED" ? "승인" : "거절"}되었습니다.`,
+    });
+  } catch (error) {
+    console.error(error);
+    res
+      .status(500)
+      .json({ success: false, error: { message: "요청 처리 실패" } });
   }
 };
 
@@ -766,3 +852,205 @@ function generateRandomBracket(participatingTeams) {
 
   return matches;
 }
+
+// ==========================================
+// 리그 순위표 조회 (NEW)
+// ==========================================
+exports.getLeagueStandings = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const tournament = await prisma.tournament.findUnique({
+      where: { id: parseInt(id) },
+    });
+
+    if (!tournament) {
+      return res.status(404).json({
+        success: false,
+        error: { message: "대회를 찾을 수 없습니다" },
+      });
+    }
+
+    // 리그 경기 결과 조회
+    const matches = await prisma.match.findMany({
+      where: {
+        tournamentId: parseInt(id),
+        stage: "LEAGUE",
+      },
+      include: {
+        teamA: true,
+        teamB: true,
+      },
+    });
+
+    // 그룹별로 나누기 (매치 roundName 기준)
+    const groups = {};
+    const ungrouped = [];
+
+    // 경기 결과를 기반으로 팀이 어느 그룹에 속하는지 확인
+    // (A팀 vs B팀 경기에서 roundName이 'A조'라면, A팀과 B팀은 A조)
+    matches.forEach((match) => {
+      const groupName = match.roundName || "리그";
+      if (!groups[groupName]) groups[groupName] = new Set();
+      if (match.teamAId) groups[groupName].add(match.teamAId);
+      if (match.teamBId) groups[groupName].add(match.teamBId);
+    });
+
+    // 만약 그룹 정보가 없다면 전체를 하나로 취급
+    const hasGroups = Object.keys(groups).length > 0;
+
+    // 팀별 통계 계산 (기존 로직 활용)
+    const calculateStats = (targetTeamIds) => {
+      const stats = {};
+      targetTeamIds.forEach((teamId) => {
+        const pt = participatingTeams.find((p) => p.teamId === teamId);
+        if (pt) {
+          stats[teamId] = {
+            teamId: pt.teamId,
+            teamName: pt.team.name,
+            logo: pt.team.logo,
+            played: 0,
+            won: 0,
+            drawn: 0,
+            lost: 0,
+            goalsFor: 0,
+            goalsAgainst: 0,
+            points: 0,
+            recentForm: [],
+          };
+        }
+      });
+
+      matches.forEach((match) => {
+        if (
+          !targetTeamIds.has(match.teamAId) ||
+          !targetTeamIds.has(match.teamBId)
+        )
+          return;
+
+        if (
+          match.status === "DONE" &&
+          match.teamAScore !== null &&
+          match.teamBScore !== null
+        ) {
+          const teamAId = match.teamAId;
+          const teamBId = match.teamBId;
+
+          if (stats[teamAId] && stats[teamBId]) {
+            stats[teamAId].played++;
+            stats[teamBId].played++;
+
+            stats[teamAId].goalsFor += match.teamAScore;
+            stats[teamAId].goalsAgainst += match.teamBScore;
+            stats[teamBId].goalsFor += match.teamBScore;
+            stats[teamBId].goalsAgainst += match.teamAScore;
+
+            if (match.teamAScore > match.teamBScore) {
+              stats[teamAId].won++;
+              stats[teamAId].points += 3;
+              stats[teamAId].recentForm.push("W");
+              stats[teamBId].lost++;
+              stats[teamBId].recentForm.push("L");
+            } else if (match.teamAScore < match.teamBScore) {
+              stats[teamBId].won++;
+              stats[teamBId].points += 3;
+              stats[teamBId].recentForm.push("W");
+              stats[teamAId].lost++;
+              stats[teamAId].recentForm.push("L");
+            } else {
+              stats[teamAId].drawn++;
+              stats[teamAId].points += 1;
+              stats[teamAId].recentForm.push("D");
+              stats[teamBId].drawn++;
+              stats[teamBId].points += 1;
+              stats[teamBId].recentForm.push("D");
+            }
+          }
+        }
+      });
+
+      return Object.values(stats).sort((a, b) => {
+        const aGD = a.goalsFor - a.goalsAgainst;
+        const bGD = b.goalsFor - b.goalsAgainst;
+        if (b.points !== a.points) return b.points - a.points;
+        if (bGD !== aGD) return bGD - aGD;
+        return b.goalsFor - a.goalsFor;
+      });
+    };
+
+    let resultData;
+    if (Object.keys(groups).length > 1) {
+      // 다중 그룹 (ex: A조, B조)
+      resultData = Object.keys(groups)
+        .sort()
+        .map((groupName) => ({
+          groupName,
+          standings: calculateStats(groups[groupName]),
+        }));
+    } else {
+      // 단일 그룹
+      const allTeamIds = new Set(participatingTeams.map((pt) => pt.teamId));
+      resultData = calculateStats(allTeamIds);
+    }
+
+    res.json({ success: true, data: resultData });
+  } catch (error) {
+    console.error(error);
+    res
+      .status(500)
+      .json({ success: false, error: { message: "순위표 조회 실패" } });
+  }
+};
+
+// ==========================================
+// 리그 경기 일정 조회 (NEW)
+// ==========================================
+exports.getLeagueMatches = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const matches = await prisma.match.findMany({
+      where: {
+        tournamentId: parseInt(id),
+        stage: "LEAGUE",
+      },
+      include: {
+        teamA: true,
+        teamB: true,
+      },
+      orderBy: [{ roundName: "asc" }, { id: "asc" }],
+    });
+
+    const formattedMatches = matches.map((match) => ({
+      id: match.id,
+      round: match.roundName || "리그",
+      date:
+        match.matchDate && !isNaN(new Date(match.matchDate).getTime())
+          ? new Date(match.matchDate).toISOString().split("T")[0]
+          : "미정",
+      time:
+        match.matchDate && !isNaN(new Date(match.matchDate).getTime())
+          ? new Date(match.matchDate).toLocaleTimeString("ko-KR", {
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : null,
+      venue: match.venue || null,
+      teamAId: match.teamAId,
+      teamBId: match.teamBId,
+      teamAName: match.teamA?.name || "TBD",
+      teamBName: match.teamB?.name || "TBD",
+      teamAScore: match.teamAScore,
+      teamBScore: match.teamBScore,
+      status: match.status,
+      winnerTeamId: match.winnerTeamId,
+    }));
+
+    res.json({ success: true, data: formattedMatches });
+  } catch (error) {
+    console.error(error);
+    res
+      .status(500)
+      .json({ success: false, error: { message: "경기 일정 조회 실패" } });
+  }
+};
