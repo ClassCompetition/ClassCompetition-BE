@@ -2,8 +2,12 @@
 const express = require('express');
 const router = express.Router();
 const matchController = require('../controllers/matchController');
+const { verifyToken } = require('../middlewares/authMiddleware');
 
-// POST /api/matches/:id/result -> 결과 입력 및 승자 진출
-router.post('/:id/result', matchController.updateMatchResult);
+// Public: 경기 상세
+router.get('/:id', matchController.getMatchDetail);
+
+// Protected: 점수 입력 (관리자만)
+router.put('/:id/score', verifyToken, matchController.updateScore);
 
 module.exports = router;

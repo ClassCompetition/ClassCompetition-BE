@@ -3,244 +3,272 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
 // ==========================================
-// 1. 대회 생성 (규칙 설정 단계)
+// 1. 대회 목록 조회 (GET /api/tournaments)
+// ==========================================
+exports.getAllTournaments = async (req, res) => {
+  const { status, sport, page = 1 } = req.query; // 필터링
+
+  try {
+    const where = {};
+    if (status) where.status = status;
+    if (sport) where.sport = sport; // 'LoL', 'Soccer' 등
+
+    const tournaments = await prisma.tournament.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: 10, // 페이지당 10개 (임시)
+      skip: (parseInt(page) - 1) * 10,
+      include: {
+        _count: { select: { participatingTeams: true } } // 참가 팀 수
+      }
+    });
+
+    const data = tournaments.map(t => ({
+      id: t.id,
+      name: t.name,
+      sport: t.sport,
+      status: t.status,
+      isPrivate: t.isPrivate,
+      description: t.description,
+      startDate: t.startDate,
+      endDate: t.endDate,
+      teamCount: t._count.participatingTeams
+    }));
+
+    res.json({ success: true, data });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: { message: "대회 목록 조회 실패" } });
+  }
+};
+
+// ==========================================
+// 2. 대회 생성 (POST /api/tournaments)
 // ==========================================
 exports.createTournament = async (req, res) => {
-  // format: 'TOURNAMENT' | 'LEAGUE' | 'HYBRID'
-  // playoffTeams: 하이브리드일 때 본선 진출 팀 수 (예: 4)
-  const { title, sportType, format, teamCount, playoffTeams } = req.body;
+  const { name, sport, description, isPrivate, startDate, endDate } = req.body;
   const managerId = req.userId;
 
   try {
-    const tournament = await prisma.tournament.create({
+    const newTournament = await prisma.tournament.create({
       data: {
-        name: title,
-        sport: sportType === 'lol' ? 'LoL' : '일반',
-        sportType,
-        format: format || 'TOURNAMENT',
+        name,
+        sport, // 'LoL', 'Soccer' ...
+        description,
+        isPrivate: isPrivate || false,
+        startDate: startDate ? new Date(startDate) : null,
+        endDate: endDate ? new Date(endDate) : null,
+        status: 'UPCOMING', // 초기 상태
         managerId,
-        status: 'recruiting',
-        description: `${teamCount}팀 참여 ${format} 대회`,
-        
-        // ⭐️ 하이브리드 설정 저장
-        hasPlayoff: format === 'HYBRID',
-        playoffTeams: format === 'HYBRID' ? parseInt(playoffTeams) : null
-      },
+        inviteCode: isPrivate ? Math.random().toString(36).substring(2, 8).toUpperCase() : null
+      }
     });
 
-    // 토너먼트 방식은 처음부터 대진표 틀을 짜둠
-    if (format === 'TOURNAMENT') {
-      await generateEmptyBracket(tournament.id, teamCount, 'TOURNAMENT');
-    }
-    // 리그나 하이브리드는 팀이 다 모이고 '시작' 눌러야 매치 생성됨 (여기선 패스)
-
-    res.status(201).json({ 
-      success: true, 
-      message: `${format} 대회가 생성되었습니다.`, 
-      data: tournament 
-    });
+    res.status(201).json({ success: true, data: newTournament });
 
   } catch (error) {
     console.error(error);
-    res.status(500).json({ success: false, error: '대회 생성 실패' });
+    res.status(500).json({ success: false, error: { message: "대회 생성 실패" } });
   }
 };
 
 // ==========================================
-// 2. 대회 시작 (팀 배치 및 리그/토너먼트 경기 생성)
+// 3. 대회 상세 조회 (GET /api/tournaments/:id)
 // ==========================================
-exports.startTournament = async (req, res) => {
+exports.getTournamentDetail = async (req, res) => {
   const { id } = req.params;
-  const { teamIds, method } = req.body; // method: 'RANDOM' | 'MANUAL'
 
   try {
-    const tournament = await prisma.tournament.findUnique({ where: { id: parseInt(id) } });
-    if (!tournament) return res.status(404).json({ error: "대회 없음" });
-
-    if (!teamIds || teamIds.length < 2) {
-      return res.status(400).json({ error: "최소 2개 팀이 필요합니다." });
-    }
-
-    // 팀 순서 섞기 (랜덤일 경우)
-    let orderedTeams = [...teamIds];
-    if (method === 'RANDOM') {
-      orderedTeams.sort(() => Math.random() - 0.5);
-    }
-
-    // 포맷별 경기 생성 로직
-    if (tournament.format === 'TOURNAMENT') {
-      // 이미 빈 대진표가 있으니 거기에 팀만 채워넣음
-      await assignTeamsToBracket(tournament.id, orderedTeams, 'TOURNAMENT');
-    
-    } else {
-      // LEAGUE 또는 HYBRID는 풀리그 경기 생성
-      // stage를 'LEAGUE'로 설정해서 만듦
-      await createLeagueSchedule(tournament.id, orderedTeams);
-    }
-
-    // 상태 변경
-    await prisma.tournament.update({
-      where: { id: tournament.id },
-      data: { status: 'ongoing' }
+    const tournament = await prisma.tournament.findUnique({
+      where: { id: parseInt(id) },
+      include: {
+        participatingTeams: {
+          include: { team: true }
+        }
+      }
     });
 
-    res.json({ success: true, message: `대회가 시작되었습니다! (${tournament.format})` });
+    if (!tournament) return res.status(404).json({ success: false, error: { message: "대회 없음" } });
+
+    const responseData = {
+      id: tournament.id,
+      name: tournament.name,
+      sport: tournament.sport,
+      status: tournament.status,
+      isPrivate: tournament.isPrivate,
+      description: tournament.description,
+      managerId: tournament.managerId,
+      startDate: tournament.startDate,
+      endDate: tournament.endDate,
+      teams: tournament.participatingTeams.map(pt => ({
+        id: pt.team.id,
+        name: pt.team.name,
+        logo: pt.team.logo // 로고 필드가 있다면
+      }))
+    };
+
+    res.json({ success: true, data: responseData });
 
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ success: false, error: '대회 시작 실패' });
+    res.status(500).json({ success: false, error: { message: "상세 조회 실패" } });
   }
 };
 
 // ==========================================
-// 3. ⭐️ [NEW] 플레이오프 시작 (리그 종료 후)
+// 4. 대회 참가 신청 (POST .../join)
 // ==========================================
-exports.startPlayoff = async (req, res) => {
-  const { id } = req.params; // tournamentId
+exports.joinTournament = async (req, res) => {
+  const { id } = req.params;
+  const { teamId } = req.body; // 참가할 팀 ID
+
+  try {
+    // 이미 참가했는지 확인
+    const existing = await prisma.tournamentTeam.findUnique({
+      where: {
+        tournamentId_teamId: {
+          tournamentId: parseInt(id),
+          teamId: parseInt(teamId)
+        }
+      }
+    });
+
+    if (existing) {
+      return res.status(400).json({ success: false, error: { message: "이미 참가 중인 팀입니다." } });
+    }
+
+    await prisma.tournamentTeam.create({
+      data: {
+        tournamentId: parseInt(id),
+        teamId: parseInt(teamId)
+      }
+    });
+
+    res.json({ success: true, message: "대회 참가 신청이 완료되었습니다." });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: { message: "참가 신청 실패" } });
+  }
+};
+
+// ==========================================
+// 5. 대회 설정 변경 & 시작 (PUT .../settings)
+// ==========================================
+exports.updateSettings = async (req, res) => {
+  const { id } = req.params;
+  const { name, description, status } = req.body;
+  const managerId = req.userId;
 
   try {
     const tournament = await prisma.tournament.findUnique({ where: { id: parseInt(id) } });
     
-    // 검증: 하이브리드 모드인가?
-    if (!tournament.hasPlayoff || !tournament.playoffTeams) {
-      return res.status(400).json({ error: "플레이오프 설정이 없는 대회입니다." });
+    // 권한 체크
+    if (tournament.managerId !== managerId) {
+      return res.status(403).json({ success: false, error: { message: "권한이 없습니다." } });
     }
 
-    // 1. 리그 경기 결과 집계 (순위 산정)
-    // stage가 'LEAGUE'이고 끝난 경기만 가져옴
-    const leagueMatches = await prisma.match.findMany({
-      where: { 
-        tournamentId: tournament.id,
-        stage: 'LEAGUE',
-        status: 'completed'
-      }
-    });
-
-    // 승수 계산
-    const scores = {}; 
-    leagueMatches.forEach(m => {
-      if (m.winnerId) {
-        scores[m.winnerId] = (scores[m.winnerId] || 0) + 1;
-      }
-    });
-
-    // 승수 내림차순 정렬
-    const ranking = Object.entries(scores)
-      .sort((a, b) => b[1] - a[1]) // [ [teamId, wins], ... ]
-      .map(entry => parseInt(entry[0]));
-
-    // 상위 N팀 뽑기
-    const advancedTeams = ranking.slice(0, tournament.playoffTeams);
-
-    if (advancedTeams.length < tournament.playoffTeams) {
-        return res.status(400).json({ error: "경기 데이터 부족으로 순위를 매길 수 없습니다." });
+    // 상태가 'ONGOING'으로 바뀌면 대진표 자동 생성 (토너먼트 시작!)
+    if (status === 'ONGOING' && tournament.status !== 'ONGOING') {
+      await generateBracket(tournament.id);
     }
 
-    // 2. 플레이오프 대진표 생성 (stage: 'TOURNAMENT')
-    // 상위 팀 수(예: 4강)에 맞춰 빈 대진표 생성
-    await generateEmptyBracket(tournament.id, tournament.playoffTeams, 'TOURNAMENT');
-
-    // 3. 상위 팀들을 대진표에 배치 (1위 vs 4위, 2위 vs 3위 등은 로직에 따라 다름)
-    // 여기선 순서대로(랜덤) 배치
-    await assignTeamsToBracket(tournament.id, advancedTeams, 'TOURNAMENT');
-
-    res.json({ 
-      success: true, 
-      message: `리그 종료! 상위 ${advancedTeams.length}팀이 플레이오프에 진출했습니다.`,
-      data: { advancedTeams }
+    const updated = await prisma.tournament.update({
+      where: { id: parseInt(id) },
+      data: { name, description, status }
     });
+
+    res.json({ success: true, message: "대회 설정이 업데이트되었습니다.", data: updated });
 
   } catch (error) {
     console.error(error);
-    res.status(500).json({ success: false, error: "플레이오프 전환 실패" });
+    res.status(500).json({ success: false, error: { message: "설정 업데이트 실패" } });
   }
 };
 
-// 대회 정보 조회 (대진표 포함)
+// ==========================================
+// 6. 대진표 조회 (GET .../bracket)
+// ==========================================
 exports.getBracket = async (req, res) => {
   const { id } = req.params;
   try {
     const matches = await prisma.match.findMany({
       where: { tournamentId: parseInt(id) },
-      orderBy: { id: 'asc' },
-      include: { team1: true, team2: true }
+      include: { teamA: true, teamB: true },
+      orderBy: { id: 'asc' }
     });
-    res.json({ success: true, data: matches });
+
+    // 라운드별 그룹화 (예: 8강, 4강)
+    const bracketData = matches.reduce((acc, match) => {
+      const roundName = match.roundName || 'Unassigned';
+      if (!acc[roundName]) acc[roundName] = [];
+      
+      acc[roundName].push({
+        id: match.id,
+        status: match.status,
+        teamA: match.teamA ? { id: match.teamA.id, name: match.teamA.name, score: match.teamAScore } : null,
+        teamB: match.teamB ? { id: match.teamB.id, name: match.teamB.name, score: match.teamBScore } : null,
+        winnerId: match.winnerTeamId
+      });
+      return acc;
+    }, {});
+
+    // 배열 형태로 변환
+    const result = Object.keys(bracketData).map(key => ({
+      roundName: key,
+      matches: bracketData[key]
+    }));
+
+    res.json({ success: true, data: result });
+
   } catch (error) {
-    res.status(500).json({ success: false, error: '조회 실패' });
+    res.status(500).json({ success: false, error: { message: "대진표 조회 실패" } });
   }
 };
 
-// ------------------------------------------------------------------
-// 🔒 내부 함수들 (Helper Functions)
-// ------------------------------------------------------------------
-
-// [1] 빈 대진표 틀 만들기 (8강, 4강 등)
-async function generateEmptyBracket(tournamentId, teamCount, stage) {
-  const totalRounds = Math.log2(teamCount);
-  let nextRoundMatches = []; 
-
-  for (let r = 0; r < totalRounds; r++) {
-    const matchCount = Math.pow(2, r); 
-    const currentRoundMatches = [];
-
-    for (let i = 0; i < matchCount; i++) {
-      const match = await prisma.match.create({
-        data: {
-          tournamentId,
-          stage: stage, // 'TOURNAMENT'
-          round: `Round ${totalRounds - r}`, // 결승=1, 4강=2...
-          status: 'scheduled',
-          // nextMatchId 연결 로직은 복잡도를 위해 생략 (필요 시 추가)
-        }
-      });
-      currentRoundMatches.push(match);
-    }
-    nextRoundMatches = currentRoundMatches;
-  }
-}
-
-// [2] 대진표에 팀 집어넣기
-async function assignTeamsToBracket(tournamentId, teamIds, stage) {
-  // 해당 스테이지의 가장 첫 라운드(가장 최근에 생성된 ID들) 찾기
-  // 이유: generateEmptyBracket이 결승 -> 4강 -> 8강 순으로 만들었다면
-  // ID가 가장 큰 것들이 8강(첫 라운드)임
-  const matches = await prisma.match.findMany({
-    where: { tournamentId, stage },
-    orderBy: { id: 'desc' }
+// --- [Internal Helper] 대진표 생성 함수 ---
+async function generateBracket(tournamentId) {
+  // 1. 참가 팀 가져오기 (랜덤 섞기)
+  const participation = await prisma.tournamentTeam.findMany({
+    where: { tournamentId },
+    select: { teamId: true }
   });
+  
+  let teams = participation.map(p => p.teamId).sort(() => Math.random() - 0.5);
+  const teamCount = teams.length;
 
-  const firstRoundMatchCount = teamIds.length / 2;
-  const targetMatches = matches.slice(0, firstRoundMatchCount);
+  // 2. 라운드 계산 (2, 4, 8, 16강...)
+  // 예: 5팀이면 8강부터 시작 (부전승 포함)
+  let roundSize = 2;
+  while (roundSize < teamCount) roundSize *= 2;
 
-  for (let i = 0; i < targetMatches.length; i++) {
-    await prisma.match.update({
-      where: { id: targetMatches[i].id },
-      data: {
-        team1Id: teamIds[i * 2],
-        team2Id: teamIds[i * 2 + 1],
-        status: 'scheduled'
-      }
+  // 3. 첫 라운드 매치 생성
+  // (복잡한 부전승 로직 대신 단순화: 빈 자리는 NULL로 둬서 부전승 처리)
+  const matchesToCreate = [];
+  const totalRounds = Math.log2(roundSize);
+
+  // 라운드별 경기 수 (8강=4경기, 4강=2경기, 결승=1경기)
+  // 여기서는 '첫 라운드'만 팀을 배정하고, 상위 라운드는 빈 경기로 생성해둠
+  
+  // (A) 상위 라운드부터 거꾸로 생성해서 ID 연결? (복잡함)
+  // (B) 그냥 모든 슬롯을 생성해두고 나중에 업데이트? (쉬움) -> 이 방식 선택
+
+  // 간단하게: 8강전(4경기) 생성 -> 팀 배정
+  const matchCount = roundSize / 2;
+  for (let i = 0; i < matchCount; i++) {
+    const teamAId = teams[i * 2] || null; // 팀이 없으면 부전승
+    const teamBId = teams[i * 2 + 1] || null;
+
+    // 만약 한쪽만 있으면 자동 승자 처리 로직도 필요하나, 일단 'scheduled'로 둠
+    matchesToCreate.push({
+      tournamentId,
+      roundName: `${roundSize}강`, // 8강, 4강 등
+      teamAId,
+      teamBId,
+      status: (teamAId && teamBId) ? 'UPCOMING' : 'DONE', // 둘 다 있어야 경기 예정
+      winnerTeamId: (!teamBId && teamAId) ? teamAId : (!teamAId && teamBId) ? teamBId : null // 부전승 처리
     });
   }
-}
 
-// [3] 리그전 스케줄 만들기 (Round Robin)
-async function createLeagueSchedule(tournamentId, teamIds) {
-  const matches = [];
-  const n = teamIds.length;
-
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      matches.push({
-        tournamentId,
-        stage: 'LEAGUE', // ⭐️ 리그 경기임을 표시
-        round: "League", 
-        team1Id: teamIds[i],
-        team2Id: teamIds[j],
-        status: 'scheduled'
-      });
-    }
-  }
-  await prisma.match.createMany({ data: matches });
+  await prisma.match.createMany({ data: matchesToCreate });
 }

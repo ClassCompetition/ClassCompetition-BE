@@ -1,11 +1,10 @@
-// src/routes/authRouter.js
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
+const { verifyToken } = require('../middlewares/authMiddleware');
 
-// 명세서 1.1 ~ 1.3
+router.post('/register', authController.register); // 신규 추가
 router.post('/login', authController.login);
-router.post('/logout', authController.logout);
-router.post('/refresh', authController.refresh);
+router.get('/me', verifyToken, authController.getMe); // 토큰 검증 필요
 
 module.exports = router;

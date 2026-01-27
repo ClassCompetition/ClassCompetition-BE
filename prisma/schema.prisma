@@ -9,177 +9,291 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// 1. 사용자 (User)
+// ==========================================
+// 1. 사용자 (Users)
+// ==========================================
 model User {
+  id           Int      @id @default(autoincrement())
+  email        String   @unique
+  passwordHash String?  @map("password_hash") // 명세서: password_hash
+  name         String
+  characterImage String? @map("character_image_url")
+  points       Int      @default(1000)
+  
+  // 소셜 로그인 지원을 위해 유지 (명세서 외 추가 필드)
+  nickname     String?  @unique
+  kakaoId      String?  @unique @map("kakao_id")
+  googleId     String?  @unique @map("google_id")
+  refreshToken String?  @map("refresh_token")
+
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  profiles         UserProfile[]
+  teamMemberships  TeamMember[]
+  joinRequests     TeamJoinRequest[]
+  managedTournaments Tournament[]
+  matchLineups     MatchLineup[]
+  tactics          Tactic[]
+  predictions      Prediction[]
+
+  @@map("users") // 실제 DB 테이블명: users
+}
+
+// ==========================================
+// 2. 사용자 프로필 (User_Profiles) - 종목별
+// ==========================================
+model UserProfile {
   id            Int      @id @default(autoincrement())
-  email         String   @unique
-  nickname      String   @unique
-  name          String?  
-  department    String?  
-  avatar        String?  
-  password      String?  
+  userId        Int      @map("user_id")
+  sportType     String   @map("sport_type") // 'lol', 'soccer', 'basketball', 'futsal'
+  position      String?
+  tier          String?  // LoL 전용
+  champions     String?  // LoL 전용 (Text)
+  preferredFoot String?  @map("preferred_foot") // Soccer/Futsal
+  height        String?  // Basketball
+  introduction  String?  @db.Text
   
-  kakaoId       String?  @unique
-  googleId      String?  @unique
+  createdAt     DateTime @default(now()) @map("created_at")
 
-  points        Int      @default(1000) 
-  
-  refreshToken  String?  
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  teamMembers   TeamMember[]
-  predictions   Prediction[]
-  managedTournaments Tournament[] 
-  sportProfiles SportProfile[] 
+  @@unique([userId, sportType])
+  @@map("user_profiles")
 }
 
-// 2. 스포츠 프로필
-model SportProfile {
-  id          Int      @id @default(autoincrement())
-  sportType   String   
-  data        Json     
-  
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  userId      Int
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, sportType]) 
-}
-
-// 3. 팀
+// ==========================================
+// 3. 팀 (Teams)
+// ==========================================
 model Team {
-  id            Int      @id @default(autoincrement())
-  name          String
-  sport         String   
-  sportType     String   
-  description   String?  @db.Text
-  inviteCode    String   @unique 
-  
-  wins          Int      @default(0)
-  losses        Int      @default(0)
-  
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id                   Int      @id @default(autoincrement())
+  name                 String
+  sport                String   // 'LoL', 'Soccer' (표기용)
+  sportType            String   @map("sport_type") // 'lol', 'soccer' (로직용)
+  inviteCode           String   @unique @map("invite_code")
+  description          String?  @db.Text
+  wins                 Int      @default(0)
+  losses               Int      @default(0)
+  matchCount           Int      @default(0) @map("match_count")
+  representativeTacticId Int?   @map("representative_tactic_id")
 
-  members       TeamMember[]
-  tactics       Tactic[]
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  members              TeamMember[]
+  joinRequests         TeamJoinRequest[]
+  tournamentTeams      TournamentTeam[]
+  wonTournaments       Tournament[] // 우승한 대회들
   
-  homeMatches   Match[] @relation("HomeTeam")
-  awayMatches   Match[] @relation("AwayTeam")
+  homeMatches          Match[] @relation("TeamA")
+  awayMatches          Match[] @relation("TeamB")
+  wonMatches           Match[] @relation("WinnerTeam")
+  
+  tactics              Tactic[]
+  predictedIn          Prediction[]
+  lineups              MatchLineup[]
+
+  @@map("teams")
 }
 
-// 4. 팀원
+// ==========================================
+// 4. 팀 멤버 (Team_Members)
+// ==========================================
 model TeamMember {
-  id            Int      @id @default(autoincrement())
-  role          String   @default("member") 
-  status        String   @default("pending") 
-  backNumber    Int?
-  applicationData Json?    
-  
-  joinedAt      DateTime @default(now())
+  id        Int      @id @default(autoincrement())
+  teamId    Int      @map("team_id")
+  userId    Int      @map("user_id")
+  role      String   // 'leader', 'member'
+  position  String?
+  joinedAt  DateTime @default(now()) @map("joined_at")
 
-  userId        Int
-  user          User     @relation(fields: [userId], references: [id])
-  
-  teamId        Int
-  team          Team     @relation(fields: [teamId], references: [id])
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, teamId])
+  @@unique([teamId, userId])
+  @@map("team_members")
 }
 
-// 5. 대회 (Tournament) - ⭐️ 플레이오프 설정 추가
+// ==========================================
+// 5. 팀 가입 신청 (Team_Join_Requests) [NEW]
+// ==========================================
+model TeamJoinRequest {
+  id          Int       @id @default(autoincrement())
+  teamId      Int       @map("team_id")
+  userId      Int       @map("user_id")
+  position    String?
+  status      String    @default("pending") // 'pending', 'approved', 'rejected'
+  appliedAt   DateTime  @default(now()) @map("applied_at")
+  processedAt DateTime? @map("processed_at")
+
+  team        Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+  @@map("team_join_requests")
+}
+
+// ==========================================
+// 6. 대회 (Tournaments)
+// ==========================================
 model Tournament {
-  id            Int      @id @default(autoincrement())
-  name          String
-  sport         String
-  sportType     String
-  format        String   // "TOURNAMENT", "LEAGUE", "HYBRID"
+  id          Int       @id @default(autoincrement())
+  name        String
+  sport       String
+  status      String    // 'UPCOMING', 'ONGOING', 'ENDED'
+  isPrivate   Boolean   @default(false) @map("is_private")
+  inviteCode  String?   @map("invite_code")
+  description String?   @db.Text
+  managerId   Int?      @map("manager_id")
+  winnerId    Int?      @map("winner_id")
+  startDate   DateTime? @db.Date @map("start_date")
+  endDate     DateTime? @db.Date @map("end_date")
   
-  status        String   @default("recruiting") 
-  
-  // ⭐️ [NEW] 플레이오프 설정
-  hasPlayoff    Boolean  @default(false) // 하이브리드 여부
-  playoffTeams  Int?     // 상위 몇 팀이 본선 가는지 (예: 4)
+  // 기존 로직 호환을 위해 유지 (명세서에는 없지만 필요시 사용)
+  format      String?   @default("TOURNAMENT") 
 
-  startDate     DateTime? // (선택으로 변경)
-  endDate       DateTime?
-  
-  description   String?  @db.Text
-  rules         String?  @db.Text
-  prize         String?
-  
-  managerId     Int
-  manager       User     @relation(fields: [managerId], references: [id])
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
 
-  createdAt     DateTime @default(now())
+  manager     User?     @relation(fields: [managerId], references: [id])
+  winner      Team?     @relation(fields: [winnerId], references: [id])
   
-  matches       Match[]
+  participatingTeams TournamentTeam[]
+  matches            Match[]
+
+  @@map("tournaments")
 }
 
-// 6. 경기 (Match) - ⭐️ 스테이지 구분 추가
+// ==========================================
+// 7. 대회 참가 팀 (Tournament_Teams) [NEW]
+// ==========================================
+model TournamentTeam {
+  id           Int      @id @default(autoincrement())
+  tournamentId Int      @map("tournament_id")
+  teamId       Int      @map("team_id")
+  joinedAt     DateTime @default(now()) @map("joined_at")
+
+  tournament   Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  team         Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([tournamentId, teamId])
+  @@map("tournament_teams")
+}
+
+// ==========================================
+// 8. 경기 (Matches)
+// ==========================================
 model Match {
-  id            Int      @id @default(autoincrement())
+  id            Int       @id @default(autoincrement())
+  tournamentId  Int       @map("tournament_id")
+  roundName     String?   @map("round_name") // '8강', '준결승'
   
-  // ⭐️ [NEW] 경기 단계 (예선/본선 구분용)
-  stage         String   @default("TOURNAMENT") // "LEAGUE" or "TOURNAMENT"
+  teamAId       Int?      @map("team_a_id")
+  teamBId       Int?      @map("team_b_id")
+  teamAScore    Int?      @map("team_a_score")
+  teamBScore    Int?      @map("team_b_score")
+  winnerTeamId  Int?      @map("winner_team_id")
+  
+  status        String    // 'UPCOMING', 'ONGOING', 'DONE'
+  matchDate     DateTime? @map("match_date")
+  
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at")
 
-  round         String?  // "8강", "League Round 1"
-  status        String   @default("scheduled") 
-  
-  scheduledAt   DateTime? // (선택으로 변경)
-  location      String?
-  
-  team1Score    Int?
-  team2Score    Int?
-  
-  team1Id       Int?
-  team1         Team?    @relation("HomeTeam", fields: [team1Id], references: [id])
-  team2Id       Int?
-  team2         Team?    @relation("AwayTeam", fields: [team2Id], references: [id])
-  
-  winnerId      Int?     
-
-  nextMatchId   Int?
-
-  tournamentId  Int
+  // Relations
   tournament    Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
-  
+  teamA         Team?      @relation("TeamA", fields: [teamAId], references: [id])
+  teamB         Team?      @relation("TeamB", fields: [teamBId], references: [id])
+  winnerTeam    Team?      @relation("WinnerTeam", fields: [winnerTeamId], references: [id])
+
+  lineups       MatchLineup[]
   predictions   Prediction[]
+  stats         PredictionStat?
+
+  @@map("matches")
 }
 
-// 7. 승부 예측
+// ==========================================
+// 9. 경기 라인업 (Match_Lineups) [NEW]
+// ==========================================
+model MatchLineup {
+  id        Int      @id @default(autoincrement())
+  matchId   Int      @map("match_id")
+  teamId    Int?     @map("team_id")
+  userId    Int?     @map("user_id")
+  position  String
+  champion  String?  // LoL 전용
+  createdAt DateTime @default(now()) @map("created_at")
+
+  match     Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  team      Team?    @relation(fields: [teamId], references: [id])
+  user      User?    @relation(fields: [userId], references: [id])
+
+  @@map("match_lineups")
+}
+
+// ==========================================
+// 10. 전술 (Tactics)
+// ==========================================
+model Tactic {
+  id        Int      @id @default(autoincrement())
+  creatorId Int?     @map("creator_id") // 명세서: creator_id
+  teamId    Int?     @map("team_id")
+  name      String
+  boardType String   @map("board_type") // 'soccer', 'lol'
+  type      String?  // 'formation', 'strategy'
+  isPublic  Boolean  @default(false) @map("is_public")
+  positions Json     // JSONB
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  creator   User?    @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  team      Team?    @relation(fields: [teamId], references: [id])
+
+  @@map("tactics")
+}
+
+// ==========================================
+// 11. 승부예측 (Predictions)
+// ==========================================
 model Prediction {
   id              Int      @id @default(autoincrement())
-  betAmount       Int      
-  potentialWin    Int?     
-  result          String   @default("pending") 
+  userId          Int      @map("user_id")
+  matchId         Int      @map("match_id")
+  predictedTeamId Int      @map("predicted_team_id")
+  betAmount       Int      @map("bet_amount")
+  odds            Decimal? @db.Decimal(5, 2)
+  status          String?  @default("pending") // 'pending', 'won', 'lost'
+  payout          Int?
   
-  createdAt       DateTime @default(now())
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
 
-  userId          Int
-  user            User     @relation(fields: [userId], references: [id])
-  
-  matchId         Int
-  match           Match    @relation(fields: [matchId], references: [id])
-  
-  predictedTeamId Int      
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  match           Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  predictedTeam   Team     @relation(fields: [predictedTeamId], references: [id])
+
+  @@unique([userId, matchId])
+  @@map("predictions")
 }
 
-// 8. 전술판
-model Tactic {
-  id            Int      @id @default(autoincrement())
-  name          String
-  isLocked      Boolean  @default(false)
-  writerId      Int?     
-  positions     Json     
+// ==========================================
+// 12. 예측 통계 (Prediction_Stats) [NEW]
+// ==========================================
+model PredictionStat {
+  id              Int      @id @default(autoincrement())
+  matchId         Int      @unique @map("match_id")
+  totalVotes      Int      @default(0) @map("total_votes")
+  totalPoints     Int      @default(0) @map("total_points")
+  teamAPercentage Decimal? @default(0) @map("team_a_percentage") @db.Decimal(5, 2)
+  teamBPercentage Decimal? @default(0) @map("team_b_percentage") @db.Decimal(5, 2)
   
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
 
-  teamId        Int
-  team          Team     @relation(fields: [teamId], references: [id])
+  match           Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@map("prediction_stats")
 }

@@ -2,37 +2,56 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
-// 1. 내 프로필 조회 (신규)
-// GET /api/users/me
+// ==========================================
+// 1. 내 프로필 조회 (GET /api/users/me)
+// ==========================================
 exports.getMe = async (req, res) => {
   try {
-    const userId = req.userId; // authMiddleware에서 넣어줌
+    const userId = req.userId;
     if (!userId) return res.status(401).json({ success: false, error: "로그인 필요" });
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      include: { sportProfiles: true }
+      include: { profiles: true } // 종목별 프로필 함께 조회
     });
 
     if (!user) return res.status(404).json({ success: false, error: "유저 없음" });
 
-    // 비밀번호 등 민감한 정보는 빼고 주기 (선택사항)
-    const { password, ...userData } = user;
+    // ⭐️ [변경] 종목별 프로필 정리 (이미지는 User에 통합됨)
+    const profilesMap = {};
+    user.profiles.forEach(p => {
+        profilesMap[p.sportType] = {
+            position: p.position,
+            tier: p.tier,
+            champions: p.champions,
+            introduction: p.introduction
+            // 여기엔 이미지가 없고, user.characterImage를 공통으로 사용
+        };
+    });
+
+    // 민감 정보 제외
+    const { passwordHash, refreshToken, ...userData } = user;
+    
+    // 응답 데이터에 profiles 추가
+    userData.profiles = profilesMap;
+
     res.json({ success: true, data: userData });
+
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, error: "서버 에러" });
   }
 };
 
-// 2. 프로필 수정 (닉네임 등) - authController에서 이사 옴!
+// ==========================================
+// 2. 기본 정보 수정 (닉네임 등)
 // PATCH /api/users/me
+// ==========================================
 exports.updateProfile = async (req, res) => {
   const userId = req.userId;
   const { nickname, department } = req.body;
 
   try {
-    // 닉네임 중복 체크
     if (nickname) {
       const check = await prisma.user.findUnique({ where: { nickname } });
       if (check && check.id !== userId) {
@@ -52,19 +71,47 @@ exports.updateProfile = async (req, res) => {
   }
 };
 
-// 3. 내 팀 목록 조회 (기존 기능 유지 + 업데이트)
-// GET /api/users/me/teams
-exports.getMyTeams = async (req, res) => {
-  const userId = req.userId; // 이제 미들웨어에서 가져옴!
+// ==========================================
+// 3. 종목별 프로필 + 캐릭터 이미지 수정 (PUT /api/users/me/sports/:sportType)
+// ==========================================
+exports.updateSportProfile = async (req, res) => {
+  const userId = req.userId;
+  const { sportType } = req.params;
+  
+  // characterImageUrl이 들어오면 -> User 테이블(통합 이미지) 업데이트
+  // 나머지 정보 -> UserProfile 테이블(종목별 정보) 업데이트
+  const { position, tier, champions, introduction, characterImageUrl } = req.body;
 
   try {
-    const myTeams = await prisma.teamMember.findMany({
-      where: { userId: userId },
-      include: { team: true }
+    // 트랜잭션으로 안전하게 처리
+    await prisma.$transaction(async (tx) => {
+        
+      // 1. 이미지가 있으면 '통합 캐릭터 이미지' 업데이트
+      if (characterImageUrl) {
+        await tx.user.update({
+          where: { id: userId },
+          data: { characterImage: characterImageUrl }
+        });
+      }
+
+      // 2. 종목별 정보 업데이트 (upsert)
+      await tx.userProfile.upsert({
+        where: {
+          userId_sportType: { userId, sportType }
+        },
+        update: {
+          position, tier, champions, introduction
+        },
+        create: {
+          userId, sportType, position, tier, champions, introduction
+        }
+      });
     });
-    res.json({ success: true, data: myTeams });
+
+    res.json({ success: true, message: "프로필 및 캐릭터 이미지가 업데이트되었습니다." });
+
   } catch (error) {
     console.error(error);
-    res.status(500).json({ success: false, error: "팀 목록 조회 실패" });
+    res.status(500).json({ success: false, error: { message: "프로필 수정 실패" } });
   }
 };

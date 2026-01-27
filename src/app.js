@@ -12,6 +12,7 @@ const teamRouter = require('./routes/teamRouter');
 const userRouter = require('./routes/userRouter');
 const tacticRouter = require('./routes/tacticRouter');
 const predictionRouter = require('./routes/predictionRouter'); // [변경] bet -> prediction
+const uploadRouter = require('./routes/uploadRouter');
 
 dotenv.config(); 
 
@@ -24,6 +25,7 @@ app.use(express.json());
 
 // 정적 파일 제공 (업로드 폴더)
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+app.use('/uploads', express.static('uploads'));
 
 // ================= 라우터 등록 =================
 app.use('/api/auth', authRouter);              // [신규] 로그인/로그아웃
@@ -33,6 +35,7 @@ app.use('/api/tournaments', tournamentRouter); // 대회 관련
 app.use('/api/matches', matchRouter);          // 경기 관련
 app.use('/api/tactics', tacticRouter);         // 전술판
 app.use('/api/predictions', predictionRouter); // [신규] 승부예측 (구 bets)
+app.use('/api/upload', uploadRouter);
 
 // 헬스 체크
 app.get('/', (req, res) => {

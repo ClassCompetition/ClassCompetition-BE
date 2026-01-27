@@ -2,93 +2,135 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
-exports.updateMatchResult = async (req, res) => {
-  const { id } = req.params; // matchId
-  const { winnerId, scoreA, scoreB } = req.body;
+// ==========================================
+// 1. 경기 상세 조회 (GET /api/matches/:id)
+// ==========================================
+exports.getMatchDetail = async (req, res) => {
+  const { id } = req.params;
 
   try {
-    // 1. 경기 정보 + 대회 정보 + 양 팀 멤버 정보까지 싹 긁어오기
     const match = await prisma.match.findUnique({
       where: { id: parseInt(id) },
       include: {
-        tournament: true, // 대회 관리자 찾기 위해
-        teamA: { include: { members: true } }, // A팀 멤버(팀장, 선수)
-        teamB: { include: { members: true } }  // B팀 멤버(팀장, 선수)
+        tournament: true,
+        teamA: { include: { members: true } },
+        teamB: { include: { members: true } },
+        predictions: true
       }
     });
 
-    if (!match) return res.status(404).json({ error: "경기 없음" });
+    if (!match) return res.status(404).json({ success: false, error: { message: "경기 없음" } });
 
-    // [트랜잭션 시작] 경기 결과 업데이트 + 다음 라운드 진출 + 포인트 지급
-    await prisma.$transaction(async (tx) => {
-      
-      // (1) 경기 결과 업데이트
-      await tx.match.update({
-        where: { id: match.id },
-        data: { winnerId, scoreA, scoreB, status: 'FINISHED' }
-      });
+    // 예측 통계 계산
+    const totalVotes = match.predictions.length;
+    const teamAVotes = match.predictions.filter(p => p.predictedTeamId === match.teamAId).length;
+    const teamBVotes = totalVotes - teamAVotes;
 
-      // (2) 다음 라운드 진출 로직 (기존과 동일)
-      if (match.nextMatchId) {
-        const nextMatch = await tx.match.findUnique({ where: { id: match.nextMatchId } });
-        if (!nextMatch.teamAId) {
-          await tx.match.update({ where: { id: nextMatch.id }, data: { teamAId: winnerId } });
-        } else {
-          await tx.match.update({ where: { id: nextMatch.id }, data: { teamBId: winnerId } });
+    res.json({
+      success: true,
+      data: {
+        id: match.id,
+        tournamentName: match.tournament.name,
+        roundName: match.roundName,
+        status: match.status,
+        matchDate: match.matchDate,
+        teamA: match.teamA ? { id: match.teamA.id, name: match.teamA.name, score: match.teamAScore } : null,
+        teamB: match.teamB ? { id: match.teamB.id, name: match.teamB.name, score: match.teamBScore } : null,
+        predictions: {
+          totalVotes,
+          teamA: teamAVotes,
+          teamB: teamBVotes
         }
-      }
-
-      // (3) ⭐️ 활동 포인트 지급 (핵심 로직) ⭐️
-      // 대상자들을 모두 모읍니다.
-      const tournamentManagerId = match.tournament.managerId;
-      
-      // 양 팀의 모든 멤버들 (팀장 포함)
-      const allMembers = [...match.teamA.members, ...match.teamB.members];
-      
-      // 중복 지급 방지를 위해 Set 사용 (처리된 유저 ID 기록)
-      const processedUserIds = new Set();
-
-      // A. 대회 관리자 처리 (최우선 순위)
-      // 대회 관리자에게 100P 지급
-      if (tournamentManagerId) {
-        await tx.user.update({
-          where: { id: tournamentManagerId },
-          data: { point: { increment: 100 } }
-        });
-        processedUserIds.add(tournamentManagerId); // 처리 완료 명단에 등록
-      }
-
-      // B. 나머지 인원 처리 (팀 관리자 vs 선수)
-      for (const member of allMembers) {
-        const userId = member.userId;
-
-        // 이미 대회 관리자로서 포인트를 받았다면? -> 패스! (중복 지급 X)
-        if (processedUserIds.has(userId)) continue;
-
-        let rewardPoint = 0;
-
-        if (member.role === 'LEADER') {
-          // 팀 관리자: 200P
-          rewardPoint = 200;
-        } else {
-          // 일반 선수: 100P
-          rewardPoint = 100;
-        }
-
-        // 포인트 지급
-        await tx.user.update({
-          where: { id: userId },
-          data: { point: { increment: rewardPoint } }
-        });
-        
-        processedUserIds.add(userId); // 처리 완료
       }
     });
-
-    res.json({ message: '경기 종료! 결과 입력 및 활동 포인트 지급 완료.' });
 
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: '결과 처리 실패' });
+    res.status(500).json({ success: false, error: { message: "경기 조회 실패" } });
+  }
+};
+
+// ==========================================
+// 2. 경기 결과 입력 (PUT /api/matches/:id/score)
+// ==========================================
+exports.updateScore = async (req, res) => {
+  const { id } = req.params;
+  const { teamAScore, teamBScore, winnerTeamId, status } = req.body;
+  const userId = req.userId; 
+
+  try {
+    const match = await prisma.match.findUnique({ 
+        where: { id: parseInt(id) },
+        include: { tournament: true } 
+    });
+
+    if (!match) return res.status(404).json({ success: false, error: { message: "경기 없음" } });
+    if (match.tournament.managerId !== userId) {
+        return res.status(403).json({ success: false, error: { message: "권한이 없습니다." } });
+    }
+
+    // 트랜잭션으로 결과 저장 + 포인트 정산 처리
+    await prisma.$transaction(async (tx) => {
+        // 1. 경기 결과 업데이트
+        await tx.match.update({
+          where: { id: parseInt(id) },
+          data: {
+            teamAScore, teamBScore, winnerTeamId, status: status || 'DONE'
+          }
+        });
+
+        // 2. 경기가 끝났다면('DONE'), 베팅 정산 시작
+        if (status === 'DONE' && winnerTeamId) {
+            // 해당 경기의 모든 예측 가져오기
+            const predictions = await tx.prediction.findMany({
+                where: { matchId: parseInt(id), status: 'pending' }
+            });
+
+            // 전체 베팅 금액 (배당률 계산용)
+            const totalPot = predictions.reduce((sum, p) => sum + p.betAmount, 0);
+            // 승리 팀에 건 총 금액
+            const winningPot = predictions
+                .filter(p => p.predictedTeamId === winnerTeamId)
+                .reduce((sum, p) => sum + p.betAmount, 0);
+
+            // 배당률 (승리한 사람이 없으면 1배 - 즉 원금만? 혹은 시스템 룰에 따름. 여기선 단순화)
+            // (간단 로직: 전체 판돈 / 승리 팀 판돈)
+            let multiplier = winningPot > 0 ? totalPot / winningPot : 1;
+            
+            // 수수료 떼기? (예: 90%만 지급) -> 여기선 생략하고 100% 지급
+
+            for (const p of predictions) {
+                if (p.predictedTeamId === winnerTeamId) {
+                    // 승리: 배당금 지급
+                    const payout = Math.floor(p.betAmount * multiplier);
+                    
+                    // 1) 예측 상태 업데이트
+                    await tx.prediction.update({
+                        where: { id: p.id },
+                        data: { status: 'won', payout }
+                    });
+                    
+                    // 2) 유저 포인트 지급
+                    await tx.user.update({
+                        where: { id: p.userId },
+                        data: { points: { increment: payout } }
+                    });
+
+                } else {
+                    // 패배: 상태만 업데이트
+                    await tx.prediction.update({
+                        where: { id: p.id },
+                        data: { status: 'lost', payout: 0 }
+                    });
+                }
+            }
+        }
+    });
+
+    res.json({ success: true, message: "경기 결과 저장 및 포인트 정산 완료." });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: { message: "결과 처리 실패" } });
   }
 };
