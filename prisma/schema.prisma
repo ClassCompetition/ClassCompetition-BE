@@ -152,7 +152,8 @@ model Tournament {
   endDate     DateTime? @db.Date @map("end_date")
   
   // 기존 로직 호환을 위해 유지 (명세서에는 없지만 필요시 사용)
-  format      String?   @default("TOURNAMENT") 
+  format       String   @default("TOURNAMENT") // "TOURNAMENT", "LEAGUE", "HYBRID"
+  playoffTeams Int?     @map("playoff_teams")  // 하이브리드 시 본선 진출 팀 수 (예: 4) 
 
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
@@ -208,6 +209,7 @@ model Match {
   teamB         Team?      @relation("TeamB", fields: [teamBId], references: [id])
   winnerTeam    Team?      @relation("WinnerTeam", fields: [winnerTeamId], references: [id])
 
+  stage        String   @default("MAIN") // "LEAGUE", "TOURNAMENT", "MAIN"
   lineups       MatchLineup[]
   predictions   Prediction[]
   stats         PredictionStat?
