@@ -4,17 +4,19 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const path = require('path');
 
+// ⭐️ [핵심 수정] 환경변수 설정을 맨 위로 올립니다!
+// 라우터들이 불러와지기 전에 환경변수가 먼저 로드되어야 합니다.
+dotenv.config(); 
+
 // 라우터 파일 가져오기
-const authRouter = require('./routes/authRouter'); // [추가] 인증
+const authRouter = require('./routes/authRouter'); 
 const tournamentRouter = require('./routes/tournamentRouter');
 const matchRouter = require('./routes/matchRouter');
 const teamRouter = require('./routes/teamRouter');
 const userRouter = require('./routes/userRouter');
 const tacticRouter = require('./routes/tacticRouter');
-const predictionRouter = require('./routes/predictionRouter'); // [변경] bet -> prediction
+const predictionRouter = require('./routes/predictionRouter'); 
 const uploadRouter = require('./routes/uploadRouter');
-
-dotenv.config(); 
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -28,14 +30,14 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 app.use('/uploads', express.static('uploads'));
 
 // ================= 라우터 등록 =================
-app.use('/api/auth', authRouter);              // [신규] 로그인/로그아웃
+app.use('/api/auth', authRouter);              // 인증
 app.use('/api/users', userRouter);             // 사용자 정보
 app.use('/api/teams', teamRouter);             // 팀 관련
 app.use('/api/tournaments', tournamentRouter); // 대회 관련
 app.use('/api/matches', matchRouter);          // 경기 관련
 app.use('/api/tactics', tacticRouter);         // 전술판
-app.use('/api/predictions', predictionRouter); // [신규] 승부예측 (구 bets)
-app.use('/api/upload', uploadRouter);
+app.use('/api/predictions', predictionRouter); // 승부예측
+app.use('/api/upload', uploadRouter);          // 업로드
 
 // 헬스 체크
 app.get('/', (req, res) => {
