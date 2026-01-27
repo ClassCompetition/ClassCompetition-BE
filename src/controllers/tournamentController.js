@@ -15,6 +15,8 @@ exports.createTournament = async (req, res) => {
     endDate,
     format,
     playoffTeams,
+    groupCount,
+    teamCount, // frontend sends 'teamCount'
   } = req.body;
   const managerId = req.userId;
 
@@ -25,21 +27,33 @@ exports.createTournament = async (req, res) => {
     const newTournament = await prisma.tournament.create({
       data: {
         name,
-        sport, // 'LoL', 'Soccer' (표기용)
+        sport:
+          sportType === "lol"
+            ? "LoL"
+            : sportType === "soccer"
+              ? "Soccer"
+              : sportType === "basketball"
+                ? "Basketball"
+                : "Futsal",
         sportType, // 'lol', 'soccer' (로직용)
         description,
         isPrivate: isPrivate || false,
         startDate: startDate ? new Date(startDate) : null,
         endDate: endDate ? new Date(endDate) : null,
-        status: "RECRUITING", // u2b50 ud300 ubaa8uc9d1 uc911 uc0c1ud0dcub85c uc2dcuc791
+        status: "RECRUITING",
         managerId,
         inviteCode: isPrivate
           ? Math.random().toString(36).substring(2, 8).toUpperCase()
           : null,
 
-        // ⭐️ [복구] 대회 포맷 설정
-        format: format || "TOURNAMENT", // 'TOURNAMENT', 'LEAGUE', 'HYBRID'
+        // ⭐️ 대회 포맷 및 설정
+        format: format || "TOURNAMENT",
         playoffTeams: format === "HYBRID" ? parseInt(playoffTeams) : null,
+        groupCount:
+          (format === "LEAGUE" || format === "HYBRID") && groupCount
+            ? parseInt(groupCount)
+            : null,
+        targetTeamCount: teamCount ? parseInt(teamCount) : null, // Store expected team count
       },
     });
 
@@ -229,7 +243,15 @@ exports.startTournament = async (req, res) => {
     // 포맷에 따른 경기 생성
     if (tournament.format === "LEAGUE" || tournament.format === "HYBRID") {
       // 리그전 스케줄 생성 (HYBRID는 예선전으로 리그 진행)
-      await _createLeagueSchedule(tournament.id, teamIds);
+      if (tournament.groupCount && tournament.groupCount > 1) {
+        await _createLeagueScheduleGroups(
+          tournament.id,
+          teamIds,
+          tournament.groupCount,
+        );
+      } else {
+        await _createLeagueSchedule(tournament.id, teamIds);
+      }
     } else {
       // 토너먼트 대진표 생성
       await _createTournamentBracket(tournament.id, teamIds, "TOURNAMENT");
@@ -339,7 +361,7 @@ exports.getBracket = async (req, res) => {
       // stage가 있으면 stage별로도 묶을 수 있음 (예: 예선/본선)
       const groupKey =
         match.stage === "LEAGUE"
-          ? "예선 리그"
+          ? match.roundName || "예선 리그" // ⭐ "A조", "B조" 등으로 표시됨
           : match.roundName || "Unassigned";
 
       if (!acc[groupKey]) acc[groupKey] = [];
@@ -428,10 +450,43 @@ async function _createLeagueSchedule(tournamentId, teamIds) {
         roundName: "League Round",
         teamAId: teamIds[i],
         teamBId: teamIds[j],
-        status: "RECRUITING", // u2b50 ud300 ubaa8uc9d1 uc911 uc0c1ud0dcub85c uc2dcuc791
+        status: "RECRUITING",
       });
     }
   }
+  await prisma.match.createMany({ data: matches });
+}
+
+// [A-2] 그룹별 리그 스케줄 생성
+async function _createLeagueScheduleGroups(tournamentId, teamIds, groupCount) {
+  // 팀을 그룹으로 나누기
+  const groups = Array.from({ length: groupCount }, () => []);
+  teamIds.forEach((teamId, index) => {
+    groups[index % groupCount].push(teamId);
+  });
+
+  const matches = [];
+
+  // 각 그룹별로 리그전 생성
+  for (let g = 0; g < groupCount; g++) {
+    const groupTeams = groups[g];
+    const n = groupTeams.length;
+    const groupName = `${String.fromCharCode(65 + g)}조`; // Group A, B, C...
+
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        matches.push({
+          tournamentId,
+          stage: "LEAGUE",
+          roundName: groupName,
+          teamAId: groupTeams[i],
+          teamBId: groupTeams[j],
+          status: "RECRUITING",
+        });
+      }
+    }
+  }
+
   await prisma.match.createMany({ data: matches });
 }
 
@@ -471,16 +526,49 @@ async function _createTournamentBracket(tournamentId, teamIds, stage) {
 // 8. 대회 설정 변경 (기존 유지)
 // ==========================================
 exports.updateSettings = async (req, res) => {
-  // ... 기존 코드와 동일 ...
-  // (단, startTournament와 로직이 겹치므로 여기선 단순 정보 수정만 담당하는 게 좋음)
   const { id } = req.params;
-  const { name, description } = req.body;
-  // ...
-  const updated = await prisma.tournament.update({
-    where: { id: parseInt(id) },
-    data: { name, description },
-  });
-  res.json({ success: true, message: "수정 완료", data: updated });
+  const { name, description, groupCount, startDate, endDate, targetTeamCount } =
+    req.body;
+
+  try {
+    const tournament = await prisma.tournament.findUnique({
+      where: { id: parseInt(id) },
+    });
+
+    if (!tournament) return res.status(404).json({ message: "대회 없음" });
+
+    // 이미 시작된 경우 조 개수 변경 불가
+    if (tournament.status === "ONGOING" && groupCount) {
+      return res
+        .status(400)
+        .json({ message: "이미 시작된 대회는 조 설정을 변경할 수 없습니다." });
+    }
+
+    // Date parsing helper
+    const parseDate = (dateStr) => {
+      if (!dateStr) return undefined; // No change
+      const d = new Date(dateStr);
+      return isNaN(d.getTime()) ? undefined : d;
+    };
+
+    const updated = await prisma.tournament.update({
+      where: { id: parseInt(id) },
+      data: {
+        name,
+        description,
+        groupCount: groupCount ? parseInt(groupCount) : undefined,
+        targetTeamCount: targetTeamCount
+          ? parseInt(targetTeamCount)
+          : undefined,
+        startDate: parseDate(startDate),
+        endDate: parseDate(endDate),
+      },
+    });
+    res.json({ success: true, message: "수정 완료", data: updated });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: { message: "수정 실패" } });
+  }
 };
 
 // ==========================================

@@ -157,7 +157,9 @@ model Tournament {
   // 기존 로직 호환을 위해 유지 (명세서에는 없지만 필요시 사용)
   format       String   @default("TOURNAMENT") // "TOURNAMENT", "LEAGUE", "HYBRID"
   playoffTeams Int?     @map("playoff_teams")  // 하이브리드 시 본선 진출 팀 수 (예: 4)
-  
+  groupCount   Int?     @map("group_count")    // 리그/하이브리드 시 조 개수 (예: 2)
+  targetTeamCount Int?  @map("target_team_count") // 참가 예정 팀 수 (목표)
+
   // ⭐ 대진표 생성 방식
   bracketGeneration String? @map("bracket_generation") // 'random' | 'manual' 
 
