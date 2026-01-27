@@ -81,6 +81,8 @@ model Team {
   createdAt            DateTime @default(now()) @map("created_at")
   updatedAt            DateTime @updatedAt @map("updated_at")
 
+  representativeTactic   Tactic? @relation("TeamRepresentative", fields: [representativeTacticId], references: [id])
+
   // Relations
   members              TeamMember[]
   joinRequests         TeamJoinRequest[]
@@ -258,6 +260,8 @@ model Tactic {
 
   creator   User?    @relation(fields: [creatorId], references: [id], onDelete: Cascade)
   team      Team?    @relation(fields: [teamId], references: [id])
+
+  representedTeams Team[] @relation("TeamRepresentative")
 
   @@map("tactics")
 }

@@ -97,19 +97,17 @@ exports.getTeamDetail = async (req, res) => {
       where: { id: parseInt(id) },
       include: {
         members: {
-          // ⭐️ [수정] avatarUrl -> characterImage (DB 필드명 일치)
           include: { user: { select: { id: true, name: true, characterImage: true, email: true } } }
         },
         joinRequests: {
-          // ⭐️ [수정] avatarUrl -> characterImage
           include: { user: { select: { id: true, name: true, characterImage: true } } }
-        }
+        },
+        representativeTactic: true
       }
     });
 
     if (!team) return res.status(404).json({ success: false, error: { message: "팀을 찾을 수 없습니다." } });
 
-    // ⭐️ [수정] leaderId 필드가 없으므로 members 목록에서 역할 확인
     const membership = team.members.find(m => m.userId === userId);
     const currentUserRole = membership ? membership.role : 'none'; // 'leader', 'member', 'none'
 
@@ -303,5 +301,46 @@ exports.seekTeam = async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, error: { message: "팀 검색 실패" } });
+  }
+};
+
+// ==========================================
+// 8. 대표 전술 설정 (PUT /api/teams/:id/representative-tactic) ⭐️ [신규 추가]
+// ==========================================
+exports.updateRepresentativeTactic = async (req, res) => {
+  const { id } = req.params;
+  const { tacticId } = req.body; // 설정할 전술 ID
+  const userId = req.userId;
+
+  try {
+    // 1. 권한 확인 (팀장만 가능)
+    const membership = await prisma.teamMember.findUnique({
+      where: { teamId_userId: { teamId: parseInt(id), userId } }
+    });
+
+    if (!membership || membership.role !== 'leader') {
+      return res.status(403).json({ success: false, error: { message: "팀장만 대표 전술을 설정할 수 있습니다." } });
+    }
+
+    // 2. 전술 유효성 확인 (우리 팀 전술인지)
+    const tactic = await prisma.tactic.findFirst({
+      where: { id: parseInt(tacticId), teamId: parseInt(id) }
+    });
+
+    if (!tactic) {
+      return res.status(404).json({ success: false, error: { message: "해당 전술을 찾을 수 없거나 우리 팀의 전술이 아닙니다." } });
+    }
+
+    // 3. 업데이트
+    await prisma.team.update({
+      where: { id: parseInt(id) },
+      data: { representativeTacticId: parseInt(tacticId) }
+    });
+
+    res.json({ success: true, message: "대표 전술이 설정되었습니다." });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: { message: "대표 전술 설정 실패" } });
   }
 };
