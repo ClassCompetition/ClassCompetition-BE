@@ -134,9 +134,10 @@ exports.getMe = async (req, res) => {
   try {
     const userId = req.userId;
 
-    // ⭐️ [변경] select를 제거하여, 필드 이름이 틀려도 에러가 나지 않게 함
+    // ⭐️ [변경] profiles 정보도 함께 조회해야 합니다!
     const user = await prisma.user.findUnique({
       where: { id: userId },
+      include: { profiles: true }, // 종목별 프로필 포함
     });
 
     if (!user) {
@@ -145,8 +146,53 @@ exports.getMe = async (req, res) => {
         .json({ success: false, error: { message: "유저 없음" } });
     }
 
+    // ⭐️ [변경] 종목별 프로필 정리 (userController.js의 로직과 동일하게 적용)
+    const profilesMap = {};
+    if (user.profiles) {
+      user.profiles.forEach((p) => {
+        // 키 불일치 방지를 위해 소문자로 변환
+        const sportKey = p.sportType ? p.sportType.toLowerCase() : '';
+        if (!sportKey) return;
+
+        // 1. JSON 데이터 파싱
+        let extraData = {};
+        try {
+          if (p.introduction && p.introduction.startsWith("{")) {
+            const parsed = JSON.parse(p.introduction);
+            if (parsed.originalIntro !== undefined) {
+              p.introduction = parsed.originalIntro;
+              delete parsed.originalIntro;
+            }
+            extraData = parsed;
+          }
+        } catch (e) { }
+
+        // 2. 기본 데이터 + 추가 데이터 병합
+        const profileData = {
+          position: p.position,
+          tier: p.tier,
+          champions: p.champions,
+          introduction: p.introduction,
+          height: p.height,
+          preferredFoot: p.preferredFoot,
+          ...extraData,
+        };
+
+        // 3. 프론트엔드 호환성을 위한 필드 매핑
+        if (sportKey === 'lol') {
+          profileData.mainLane = p.position;
+          profileData.mainChampions = p.champions;
+        }
+        if (sportKey === 'general') {
+          profileData.mainPosition = p.position;
+          profileData.mainFoot = p.preferredFoot;
+        }
+
+        profilesMap[sportKey] = profileData;
+      });
+    }
+
     // ⭐️ [안전 매핑]
-    // DB에 characterImage가 있든, avatarUrl이 있든, image가 있든 알아서 찾습니다.
     const avatarUrl =
       user.characterImage || user.avatarUrl || user.image || null;
 
@@ -157,11 +203,12 @@ exports.getMe = async (req, res) => {
       nickname: user.nickname,
       points: user.points,
       avatarUrl: avatarUrl,
+      profiles: profilesMap, // ⭐️ profiles 데이터 포함해서 반환
     };
 
     res.json({ success: true, data: responseData });
   } catch (error) {
-    console.error("❌ getMe Error Log:", error); // 서버 터미널에서 상세 에러 확인 가능
+    console.error("❌ getMe Error Log:", error);
     res
       .status(500)
       .json({ success: false, error: { message: "서버 오류 (getMe)" } });

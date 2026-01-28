@@ -130,10 +130,46 @@ exports.getTournamentDetail = async (req, res) => {
         .status(404)
         .json({ success: false, error: { message: "대회 없음" } });
 
+    // ⭐️ 우승자 정보 조회 (결승전이 끝났다면 상태와 무관하게 우승자 표시)
+    let winnerId = null;
+    
+    // 1. '결승' 라운드 매치 찾기
+    const finalMatch = await prisma.match.findFirst({
+        where: {
+            tournamentId: parseInt(id),
+            stage: 'TOURNAMENT', // 토너먼트 스테이지여야 함
+            roundName: '결승', // 명시적으로 결승전 찾기
+            status: 'DONE'
+        }
+    });
+
+    if (finalMatch && finalMatch.winnerTeamId) {
+        winnerId = finalMatch.winnerTeamId;
+    } else {
+        // 2. 결승전 이름이 다르거나 못 찾았을 경우, 가장 마지막에 완료된 토너먼트 매치 확인
+        // (단, 2강(결승)이 아닐 수도 있으니 주의 필요하지만, 기존 로직 보완 차원)
+        const lastMatch = await prisma.match.findFirst({
+            where: {
+                tournamentId: parseInt(id),
+                stage: 'TOURNAMENT',
+                status: 'DONE'
+            },
+            orderBy: { id: 'desc' }
+        });
+        
+        // 마지막 매치가 있고, 그것이 결승전일 가능성이 높음 (가장 나중에 생성/완료됨)
+        if (lastMatch && lastMatch.winnerTeamId) {
+            // 추가 검증: 이 매치가 정말 마지막 라운드인지 확인하려면 전체 라운드 구조를 봐야 하지만,
+            // 보통 결승전이 가장 마지막 id를 가짐.
+             winnerId = lastMatch.winnerTeamId;
+        }
+    }
+
     res.json({
       success: true,
       data: {
         ...tournament,
+        winnerId: winnerId || null, // 계산된 winnerId 추가
         teams: tournament.participatingTeams.map((pt) => ({
           id: pt.team.id,
           name: pt.team.name,
@@ -298,7 +334,7 @@ exports.startPlayoff = async (req, res) => {
       where: { id: parseInt(id) },
     });
 
-    // 검증
+    // 1. 유효성 검증
     if (tournament.managerId !== managerId)
       return res.status(403).json({ message: "권한 없음" });
     if (tournament.format !== "HYBRID")
@@ -308,43 +344,108 @@ exports.startPlayoff = async (req, res) => {
         .status(400)
         .json({ message: "본선 진출 팀 수가 설정되지 않았습니다." });
 
-    // 1. 리그 경기(예선) 결과 집계
+    // 2. 리그 경기(예선) 결과 조회
     const leagueMatches = await prisma.match.findMany({
       where: {
         tournamentId: parseInt(id),
         stage: "LEAGUE",
-        status: { in: ["DONE", "COMPLETED"] }, // 완료된 경기만
       },
     });
 
-    // 2. 승점 계산
-    const scores = {};
-    leagueMatches.forEach((m) => {
-      if (m.winnerTeamId) {
-        scores[m.winnerTeamId] = (scores[m.winnerTeamId] || 0) + 1; // 승리 +1점
+    // 경기가 하나도 없거나, 진행 중인 경기가 있으면 시작 불가
+    if (leagueMatches.length === 0) {
+      return res
+        .status(400)
+        .json({ message: "리그 경기가 생성되지 않았습니다." });
+    }
+    const pendingMatches = leagueMatches.filter((m) => m.status !== "DONE");
+    if (pendingMatches.length > 0) {
+      return res.status(400).json({
+        message: `아직 종료되지 않은 리그 경기가 ${pendingMatches.length}개 있습니다.`,
+      });
+    }
+
+    // 3. 조별 순위 산정 로직 (getLeagueStandings와 동일한 로직 사용)
+    const groups = {}; // { 'A조': [teamId, ...], 'B조': ... }
+    const teamStats = {}; // { teamId: { points, goalDiff, goalsFor ... } }
+
+    leagueMatches.forEach((match) => {
+      const groupName = match.roundName || "리그";
+      if (!groups[groupName]) groups[groupName] = new Set();
+      if (match.teamAId) groups[groupName].add(match.teamAId);
+      if (match.teamBId) groups[groupName].add(match.teamBId);
+
+      // 통계 초기화
+      [match.teamAId, match.teamBId].forEach((tid) => {
+        if (tid && !teamStats[tid]) {
+          teamStats[tid] = { id: tid, points: 0, goalDiff: 0, goalsFor: 0 };
+        }
+      });
+
+      // 점수 계산 (DONE 상태인 경우만)
+      if (
+        match.status === "DONE" &&
+        match.teamAScore !== null &&
+        match.teamBScore !== null
+      ) {
+        const teamA = teamStats[match.teamAId];
+        const teamB = teamStats[match.teamBId];
+
+        teamA.goalsFor += match.teamAScore;
+        teamA.goalDiff += match.teamAScore - match.teamBScore;
+        teamB.goalsFor += match.teamBScore;
+        teamB.goalDiff += match.teamBScore - match.teamAScore;
+
+        if (match.teamAScore > match.teamBScore) {
+          teamA.points += 3;
+        } else if (match.teamAScore < match.teamBScore) {
+          teamB.points += 3;
+        } else {
+          teamA.points += 1;
+          teamB.points += 1;
+        }
       }
     });
 
-    // 3. 순위 산정 (승수 내림차순)
-    const ranking = Object.entries(scores)
-      .sort((a, b) => b[1] - a[1]) // [[teamId, wins], ...]
-      .map((entry) => parseInt(entry[0]));
+    // 4. 각 조별 상위 팀 선발
+    const groupNames = Object.keys(groups).sort();
+    const groupCount = groupNames.length;
 
-    // 4. 상위 N팀 선발
-    const advancedTeams = ranking.slice(0, tournament.playoffTeams);
-    if (advancedTeams.length < tournament.playoffTeams) {
-      return res
-        .status(400)
-        .json({ error: "경기 데이터 부족으로 순위를 매길 수 없습니다." });
+    // 조가 여러 개일 경우: (본선 티켓 수 / 조 개수) 만큼 각 조에서 선발
+    // 예: 4강 본선, 2개 조 -> 각 조 2팀씩
+    if (tournament.playoffTeams % groupCount !== 0) {
+      return res.status(400).json({
+        message: `본선 팀 수(${tournament.playoffTeams})가 조 개수(${groupCount})로 나누어떨어지지 않습니다.`,
+      });
     }
+    const advancePerGroup = tournament.playoffTeams / groupCount;
+    let advancedTeams = [];
+
+    groupNames.forEach((gName) => {
+      const groupTeamIds = Array.from(groups[gName]);
+
+      // 해당 조 팀들을 순위대로 정렬
+      const sortedTeams = groupTeamIds
+        .map((tid) => teamStats[tid])
+        .sort((a, b) => {
+          if (b.points !== a.points) return b.points - a.points; // 승점
+          if (b.goalDiff !== a.goalDiff) return b.goalDiff - a.goalDiff; // 득실차
+          return b.goalsFor - a.goalsFor; // 다득점
+        });
+
+      // 상위 n팀 선택
+      const qualifiers = sortedTeams.slice(0, advancePerGroup).map((t) => t.id);
+      advancedTeams = [...advancedTeams, ...qualifiers];
+    });
 
     // 5. 플레이오프(토너먼트) 대진표 생성
-    // stage를 'TOURNAMENT'로 명시하여 생성
+    // 순위 기반 시드 배정을 위해 advancedTeams 순서를 섞거나 조정할 수 있음
+    // (여기서는 간단히 추출된 순서대로 토너먼트 생성에 넘김)
     await _createTournamentBracket(tournament.id, advancedTeams, "TOURNAMENT");
 
     res.json({
       success: true,
-      message: `예선 종료! 상위 ${advancedTeams.length}팀이 본선에 진출했습니다.`,
+      message: `예선 종료! 총 ${advancedTeams.length}팀이 본선에 진출했습니다.`,
       data: { advancedTeams },
     });
   } catch (error) {
@@ -379,6 +480,7 @@ exports.getBracket = async (req, res) => {
 
       acc[groupKey].push({
         id: match.id,
+        tournamentId: match.tournamentId, // ⭐️ tournamentId 추가
         stage: match.stage,
         teamA: match.teamA
           ? {
@@ -396,6 +498,7 @@ exports.getBracket = async (req, res) => {
           : null,
         winnerId: match.winnerTeamId,
         status: match.status,
+        matchDate: match.matchDate,
       });
       return acc;
     }, {});
@@ -477,6 +580,181 @@ exports.getParticipants = async (req, res) => {
 };
 
 // ==========================================
+// 9. [NEW] 경기 상세 정보 조회 (GET /api/tournaments/:id/matches/:matchId)
+// ==========================================
+exports.getMatchDetail = async (req, res) => {
+  const { id, matchId } = req.params; // tournamentId, matchId
+
+  try {
+    // 경기 정보 조회 (팀 정보, 대회 정보 포함)
+    const match = await prisma.match.findUnique({
+      where: { id: parseInt(matchId) },
+      include: {
+        teamA: {
+          include: {
+            members: {
+              include: {
+                user: {
+                  include: {
+                    profiles: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+        teamB: {
+          include: {
+            members: {
+              include: {
+                user: {
+                  include: {
+                    profiles: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+        tournament: true, // 헤더 표시용
+        predictions: true, // 승부예측 통계용
+      },
+    });
+
+    if (!match) {
+      return res.status(404).json({
+        success: false,
+        error: { message: "경기를 찾을 수 없습니다." },
+      });
+    }
+
+    // URL의 토너먼트 ID와 실제 경기의 토너먼트 ID가 일치하는지 검증
+    if (match.tournamentId !== parseInt(id)) {
+      return res.status(400).json({
+        success: false,
+        error: { message: "해당 대회의 경기가 아닙니다." },
+      });
+    }
+
+    // 프론트엔드 사용하기 편하게 데이터 가공
+    const totalBets = match.predictions.reduce(
+      (sum, p) => sum + p.betAmount,
+      0,
+    );
+    const teamABets = match.predictions
+      .filter((p) => p.predictedTeamId === match.teamAId)
+      .reduce((sum, p) => sum + p.betAmount, 0);
+    const teamBBets = totalBets - teamABets;
+
+    // 팀 멤버 데이터를 프론트엔드 포맷(players)으로 변환하는 헬퍼 함수
+    const formatTeamPlayers = (team) => {
+      if (!team || !team.members) {
+        console.log(`[getMatchDetail] Team ${team?.id} has no members`);
+        return [];
+      }
+      return team.members.map((member) => {
+        // 해당 대회의 종목에 맞는 프로필 찾기 (없으면 첫 번째 프로필 사용)
+        const profile =
+          member.user.profiles.find(
+            (p) =>
+              p.sportType?.toLowerCase() ===
+              match.tournament.sportType?.toLowerCase(),
+          ) || member.user.profiles[0];
+
+        return {
+          id: member.user.id,
+          name: member.user.nickname || member.user.name,
+          position: member.position || profile?.position || "TBD",
+          champion: profile?.champions || "-",
+          tier: profile?.tier,
+        };
+      });
+    };
+
+    const teamAPlayers = match.teamA ? formatTeamPlayers(match.teamA) : [];
+    const teamBPlayers = match.teamB ? formatTeamPlayers(match.teamB) : [];
+
+    console.log(`[getMatchDetail] TeamA Players Count: ${teamAPlayers.length}`);
+    console.log(`[getMatchDetail] TeamB Players Count: ${teamBPlayers.length}`);
+
+    const data = {
+      id: match.id,
+      tournamentId: match.tournamentId,
+      tournamentName: match.tournament.name,
+      sport: match.tournament.sport,
+      round: match.roundName,
+      date: match.matchDate
+        ? new Date(match.matchDate).toISOString().split("T")[0]
+        : null,
+      time: match.matchDate
+        ? new Date(match.matchDate).toLocaleTimeString("ko-KR", {
+            hour: "2-digit",
+            minute: "2-digit",
+          })
+        : null,
+      status: match.status,
+      venue: match.venue,
+
+      // 팀 정보
+      teamA: match.teamA
+        ? { ...match.teamA, players: teamAPlayers }
+        : null,
+      teamB: match.teamB
+        ? { ...match.teamB, players: teamBPlayers }
+        : null,
+      teamAScore: match.teamAScore,
+      teamBScore: match.teamBScore,
+      winnerId: match.winnerTeamId,
+
+      // 승부예측 통계
+      predictions: {
+        totalBets,
+        teamA: teamABets,
+        teamB: teamBBets,
+        teamAPercent:
+          totalBets === 0 ? 50 : Math.round((teamABets / totalBets) * 100),
+        teamBPercent:
+          totalBets === 0 ? 50 : Math.round((teamBBets / totalBets) * 100),
+      },
+
+      userPoints: 0,
+      
+      // 베팅 가능 여부 (경기 시작 전이고 상태가 UPCOMING일 때만)
+      // 날짜 비교 로직 개선: 경기 당일 포함 마감 처리 (predictionController와 로직 통일)
+      isBettingOpen: (() => {
+        if (match.status !== 'UPCOMING') return false;
+        if (!match.matchDate) return false;
+        
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        
+        const matchDate = new Date(match.matchDate);
+        matchDate.setHours(0, 0, 0, 0);
+        
+        // 오늘 날짜가 경기 날짜보다 작아야 함 (즉, 어제까지만 가능)
+        return today.getTime() < matchDate.getTime();
+      })(),
+    };
+
+    // 로그인한 유저라면 포인트 정보 추가
+    if (req.userId) {
+      const user = await prisma.user.findUnique({
+        where: { id: req.userId },
+        select: { points: true },
+      });
+      if (user) data.userPoints = user.points;
+    }
+
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error(error);
+    res
+      .status(500)
+      .json({ success: false, error: { message: "경기 상세 조회 실패" } });
+  }
+};
+
+// ==========================================
 // 참가 승인/거절 처리 (NEW)
 // ==========================================
 exports.processTournamentRequest = async (req, res) => {
@@ -523,21 +801,92 @@ exports.processTournamentRequest = async (req, res) => {
 // 🔒 내부 헬퍼 함수 (Internal Helper Functions)
 // ------------------------------------------------------------------
 
-// [A] 리그전 스케줄 생성 (Round Robin)
+function getValidDateRange(startDateStr, endDateStr) {
+  const now = new Date();
+  const originalStart = startDateStr ? new Date(startDateStr) : null;
+
+  // 1. 시작일 결정: (설정된 시작일이 없거나, 이미 지났으면) -> 오늘부터 시작
+  let effectiveStart;
+  if (!originalStart || originalStart < now) {
+    effectiveStart = new Date(); // 오늘
+  } else {
+    effectiveStart = originalStart; // 미래의 시작일 유지
+  }
+
+  // 2. 종료일 결정
+  let effectiveEnd = endDateStr ? new Date(endDateStr) : null;
+
+  // 종료일이 없거나, 시작일보다 이전이라면 -> 시작일 + 7일로 강제 설정
+  if (!effectiveEnd || effectiveEnd <= effectiveStart) {
+    effectiveEnd = new Date(effectiveStart);
+    effectiveEnd.setDate(effectiveEnd.getDate() + 7);
+  }
+
+  return { start: effectiveStart, end: effectiveEnd };
+}
+
+
+function calculateMatchDate(startDate, endDate, matchIndex, totalMatches) {
+  const start = startDate.getTime();
+  const end = endDate.getTime();
+  const duration = end - start;
+
+  // 전체 기간을 경기 수로 나누어 간격을 구함
+  const interval = totalMatches > 1 ? duration / totalMatches : 0;
+
+  // 해당 순번의 날짜 계산
+  const targetTime = start + interval * matchIndex;
+  const targetDate = new Date(targetTime);
+
+  // 시간은 "저녁 6시"로 고정 (랜덤성 배제)
+  targetDate.setHours(18, 0, 0, 0);
+
+  return targetDate;
+}
+
+// [A] 리그전 스케줄 생성 (단일 조)
 async function _createLeagueSchedule(tournamentId, teamIds) {
+  const tournament = await prisma.tournament.findUnique({
+    where: { id: tournamentId },
+    select: { startDate: true, endDate: true, format: true },
+  });
+
+  // ⭐️ 날짜 보정 로직 적용
+  let { start, end } = getValidDateRange(
+    tournament.startDate,
+    tournament.endDate,
+  );
+
+  // 하이브리드라면 리그 기간은 전체의 80%만 사용
+  if (tournament.format === "HYBRID") {
+    const totalDuration = end.getTime() - start.getTime();
+    end = new Date(start.getTime() + totalDuration * 0.8);
+  }
+
   const matches = [];
   const n = teamIds.length;
+  const totalMatches = (n * (n - 1)) / 2;
+  let matchCounter = 0;
 
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
+      const matchDate = calculateMatchDate(
+        start,
+        end,
+        matchCounter,
+        totalMatches,
+      );
+
       matches.push({
         tournamentId,
-        stage: "LEAGUE", // ⭐️ 리그 경기
+        stage: "LEAGUE",
         roundName: "League Round",
         teamAId: teamIds[i],
         teamBId: teamIds[j],
-        status: "RECRUITING",
+        status: "UPCOMING",
+        matchDate: matchDate, // ⭐️ 보정된 날짜 입력
       });
+      matchCounter++;
     }
   }
   await prisma.match.createMany({ data: matches });
@@ -545,30 +894,59 @@ async function _createLeagueSchedule(tournamentId, teamIds) {
 
 // [A-2] 그룹별 리그 스케줄 생성
 async function _createLeagueScheduleGroups(tournamentId, teamIds, groupCount) {
-  // 팀을 그룹으로 나누기
+  const tournament = await prisma.tournament.findUnique({
+    where: { id: tournamentId },
+    select: { startDate: true, endDate: true, format: true },
+  });
+
+  // ⭐️ 날짜 보정 로직 적용
+  let { start, end } = getValidDateRange(
+    tournament.startDate,
+    tournament.endDate,
+  );
+
+  if (tournament.format === "HYBRID") {
+    const totalDuration = end.getTime() - start.getTime();
+    end = new Date(start.getTime() + totalDuration * 0.8);
+  }
+
   const groups = Array.from({ length: groupCount }, () => []);
   teamIds.forEach((teamId, index) => {
     groups[index % groupCount].push(teamId);
   });
 
   const matches = [];
+  let estimatedTotalMatches = 0;
+  groups.forEach((g) => {
+    estimatedTotalMatches += (g.length * (g.length - 1)) / 2;
+  });
 
-  // 각 그룹별로 리그전 생성
+  let globalMatchCounter = 0;
+
   for (let g = 0; g < groupCount; g++) {
     const groupTeams = groups[g];
     const n = groupTeams.length;
-    const groupName = `${String.fromCharCode(65 + g)}조`; // Group A, B, C...
+    const groupName = `${String.fromCharCode(65 + g)}조`;
 
     for (let i = 0; i < n; i++) {
       for (let j = i + 1; j < n; j++) {
+        const matchDate = calculateMatchDate(
+          start,
+          end,
+          globalMatchCounter,
+          estimatedTotalMatches,
+        );
+
         matches.push({
           tournamentId,
           stage: "LEAGUE",
           roundName: groupName,
           teamAId: groupTeams[i],
           teamBId: groupTeams[j],
-          status: "RECRUITING",
+          status: "UPCOMING",
+          matchDate: matchDate, // ⭐️ 보정된 날짜 입력
         });
+        globalMatchCounter++;
       }
     }
   }
@@ -576,15 +954,51 @@ async function _createLeagueScheduleGroups(tournamentId, teamIds, groupCount) {
   await prisma.match.createMany({ data: matches });
 }
 
-// [B] 토너먼트 대진표 생성
 async function _createTournamentBracket(tournamentId, teamIds, stage) {
-  const teamCount = teamIds.length;
+  const tournament = await prisma.tournament.findUnique({
+    where: { id: tournamentId },
+    select: { startDate: true, endDate: true, format: true },
+  });
 
-  // 1. 라운드 크기 계산 (4강, 8강, 16강...)
+  // ⭐️ 날짜 보정 로직
+  let baseDate;
+
+  // 1. 하이브리드 본선인 경우: 리그 마지막 경기 다음날부터 시작
+  if (tournament.format === "HYBRID" && stage === "TOURNAMENT") {
+    const lastLeagueMatch = await prisma.match.findFirst({
+      where: {
+        tournamentId: tournamentId,
+        stage: "LEAGUE",
+      },
+      orderBy: { matchDate: "desc" },
+    });
+
+    if (lastLeagueMatch && lastLeagueMatch.matchDate) {
+      baseDate = new Date(lastLeagueMatch.matchDate);
+      baseDate.setDate(baseDate.getDate() + 1); // 다음날
+    } else {
+      // 리그 일정이 없으면 오늘부터
+      baseDate = new Date();
+    }
+  } 
+  // 2. 일반 토너먼트이거나 시작일이 없거나 이미 지난 경우: 오늘부터
+  else if (
+    !tournament.startDate ||
+    new Date(tournament.startDate) < new Date()
+  ) {
+    baseDate = new Date();
+  } 
+  // 3. 미래 시작일이 있는 경우
+  else {
+    baseDate = new Date(tournament.startDate);
+  }
+
+  baseDate.setHours(18, 0, 0, 0); // 18시 시작
+
+  const teamCount = teamIds.length;
   let roundSize = 2;
   while (roundSize < teamCount) roundSize *= 2;
 
-  // 2. 첫 라운드 매치 생성
   const matchCount = roundSize / 2;
   const matchesToCreate = [];
 
@@ -592,16 +1006,23 @@ async function _createTournamentBracket(tournamentId, teamIds, stage) {
     const teamAId = teamIds[i * 2] || null;
     const teamBId = teamIds[i * 2 + 1] || null;
 
+    // 1시간 간격 분산
+    const matchDate = new Date(baseDate.getTime() + i * 60 * 60 * 1000);
+
+    let roundName = `${roundSize}강`;
+    if (roundSize === 2) roundName = "결승";
+    else if (roundSize === 4) roundName = "준결승";
+
     matchesToCreate.push({
       tournamentId,
-      stage: stage, // 'TOURNAMENT' (본선)
-      roundName: `${roundSize}강`,
+      stage: stage,
+      roundName: roundName,
       teamAId,
       teamBId,
-      // 둘 다 있으면 예정, 하나만 있으면(부전승) 완료 처리
       status: teamAId && teamBId ? "UPCOMING" : "DONE",
       winnerTeamId:
         !teamBId && teamAId ? teamAId : !teamAId && teamBId ? teamBId : null,
+      matchDate: matchDate, // ⭐️ 보정된 날짜 입력
     });
   }
 
@@ -665,7 +1086,7 @@ exports.generateBracket = async (req, res) => {
   const userId = req.userId;
 
   try {
-    // 1. Verify manager
+    // 1. 대회 및 참가 팀 조회
     const tournament = await prisma.tournament.findUnique({
       where: { id: parseInt(id) },
       include: {
@@ -675,56 +1096,60 @@ exports.generateBracket = async (req, res) => {
       },
     });
 
-    if (!tournament) {
+    if (!tournament)
       return res.status(404).json({
         success: false,
         error: { message: "대회를 찾을 수 없습니다" },
       });
-    }
-
-    if (tournament.managerId !== userId) {
+    if (tournament.managerId !== userId)
       return res
         .status(403)
         .json({ success: false, error: { message: "권한이 없습니다" } });
-    }
 
-    // 2. Check status (must be UPCOMING or RECRUITING)
+    // 2. 상태 체크
     if (
       tournament.status !== "UPCOMING" &&
       tournament.status !== "RECRUITING"
     ) {
       return res.status(400).json({
         success: false,
-        error: { message: "대진표는 UPCOMING 상태에서만 생성할 수 있습니다" },
+        error: { message: "이미 진행 중인 대회입니다" },
       });
     }
 
-    // 3. Get participating teams
-    const teams = tournament.participatingTeams;
+    // 3. 참가 팀 확인
+    const teams = tournament.participatingTeams.filter(
+      (pt) => pt.status === "APPROVED",
+    );
+    const teamIds = teams.map((pt) => pt.teamId);
 
-    if (teams.length < 2) {
+    if (teamIds.length < 2) {
       return res.status(400).json({
         success: false,
-        error: { message: "최소 2개 팀이 필요합니다" },
+        error: { message: "최소 2개 팀이 승인되어야 합니다" },
       });
     }
 
-    // 4. Generate random bracket
-    const matches = generateRandomBracket(teams);
+    // 4. 포맷에 따라 분기 처리
+    if (tournament.format === "LEAGUE" || tournament.format === "HYBRID") {
+      // 4-A. 리그/하이브리드 -> 조별 리그 일정 생성
+      teamIds.sort(() => Math.random() - 0.5); // 팀 섞기
 
-    // 5. Create Match records
-    await prisma.match.createMany({
-      data: matches.map((m) => ({
-        tournamentId: tournament.id,
-        teamAId: m.teamAId,
-        teamBId: m.teamBId,
-        roundName: m.roundName,
-        status: "UPCOMING",
-        stage: "TOURNAMENT",
-      })),
-    });
+      if (tournament.groupCount && tournament.groupCount > 1) {
+        await _createLeagueScheduleGroups(
+          tournament.id,
+          teamIds,
+          tournament.groupCount,
+        );
+      } else {
+        await _createLeagueSchedule(tournament.id, teamIds);
+      }
+    } else {
+      // 4-B. 토너먼트 -> ⭐ [수정] 날짜 로직이 포함된 헬퍼 함수 사용
+      await _createTournamentBracket(tournament.id, teamIds, "TOURNAMENT");
+    }
 
-    // 6. Update tournament status to ONGOING
+    // 5. 대회 상태 업데이트 (ONGOING)
     await prisma.tournament.update({
       where: { id: tournament.id },
       data: {
@@ -736,15 +1161,15 @@ exports.generateBracket = async (req, res) => {
     res.json({
       success: true,
       data: {
-        matchCount: matches.length,
-        message: "대진표가 생성되었습니다",
+        message:
+          tournament.format === "TOURNAMENT"
+            ? "대진표가 생성되었습니다"
+            : "조별 리그 일정이 생성되었습니다",
       },
     });
   } catch (error) {
     console.error(error);
-    res
-      .status(500)
-      .json({ success: false, error: { message: "대진표 생성 실패" } });
+    res.status(500).json({ success: false, error: { message: "생성 실패" } });
   }
 };
 
@@ -871,6 +1296,13 @@ exports.getLeagueStandings = async (req, res) => {
       });
     }
 
+    // ⭐️ [추가] 참가 팀 정보를 먼저 가져와야 합니다!
+    // (이게 없으면 아래 calculateStats에서 에러가 납니다)
+    const participatingTeams = await prisma.tournamentTeam.findMany({
+      where: { tournamentId: parseInt(id), status: "APPROVED" },
+      include: { team: true },
+    });
+
     // 리그 경기 결과 조회
     const matches = await prisma.match.findMany({
       where: {
@@ -883,12 +1315,8 @@ exports.getLeagueStandings = async (req, res) => {
       },
     });
 
-    // 그룹별로 나누기 (매치 roundName 기준)
+    // 그룹별로 나누기
     const groups = {};
-    const ungrouped = [];
-
-    // 경기 결과를 기반으로 팀이 어느 그룹에 속하는지 확인
-    // (A팀 vs B팀 경기에서 roundName이 'A조'라면, A팀과 B팀은 A조)
     matches.forEach((match) => {
       const groupName = match.roundName || "리그";
       if (!groups[groupName]) groups[groupName] = new Set();
@@ -896,19 +1324,17 @@ exports.getLeagueStandings = async (req, res) => {
       if (match.teamBId) groups[groupName].add(match.teamBId);
     });
 
-    // 만약 그룹 정보가 없다면 전체를 하나로 취급
-    const hasGroups = Object.keys(groups).length > 0;
-
-    // 팀별 통계 계산 (기존 로직 활용)
+    // 팀별 통계 계산 함수
     const calculateStats = (targetTeamIds) => {
       const stats = {};
       targetTeamIds.forEach((teamId) => {
+        // ⭐️ 여기서 위에서 가져온 participatingTeams를 사용합니다.
         const pt = participatingTeams.find((p) => p.teamId === teamId);
         if (pt) {
           stats[teamId] = {
             teamId: pt.teamId,
             teamName: pt.team.name,
-            logo: pt.team.logo,
+            logo: pt.team.logo || null,
             played: 0,
             won: 0,
             drawn: 0,
@@ -933,54 +1359,53 @@ exports.getLeagueStandings = async (req, res) => {
           match.teamAScore !== null &&
           match.teamBScore !== null
         ) {
-          const teamAId = match.teamAId;
-          const teamBId = match.teamBId;
+          const teamA = stats[match.teamAId];
+          const teamB = stats[match.teamBId];
 
-          if (stats[teamAId] && stats[teamBId]) {
-            stats[teamAId].played++;
-            stats[teamBId].played++;
+          // 안전장치: 팀 정보가 없으면 스킵
+          if (!teamA || !teamB) return;
 
-            stats[teamAId].goalsFor += match.teamAScore;
-            stats[teamAId].goalsAgainst += match.teamBScore;
-            stats[teamBId].goalsFor += match.teamBScore;
-            stats[teamBId].goalsAgainst += match.teamAScore;
+          teamA.played++;
+          teamB.played++;
+          teamA.goalsFor += match.teamAScore;
+          teamA.goalsAgainst += match.teamBScore;
+          teamB.goalsFor += match.teamBScore;
+          teamB.goalsAgainst += match.teamAScore;
 
-            if (match.teamAScore > match.teamBScore) {
-              stats[teamAId].won++;
-              stats[teamAId].points += 3;
-              stats[teamAId].recentForm.push("W");
-              stats[teamBId].lost++;
-              stats[teamBId].recentForm.push("L");
-            } else if (match.teamAScore < match.teamBScore) {
-              stats[teamBId].won++;
-              stats[teamBId].points += 3;
-              stats[teamBId].recentForm.push("W");
-              stats[teamAId].lost++;
-              stats[teamAId].recentForm.push("L");
-            } else {
-              stats[teamAId].drawn++;
-              stats[teamAId].points += 1;
-              stats[teamAId].recentForm.push("D");
-              stats[teamBId].drawn++;
-              stats[teamBId].points += 1;
-              stats[teamBId].recentForm.push("D");
-            }
+          if (match.teamAScore > match.teamBScore) {
+            teamA.won++;
+            teamA.points += 3;
+            teamA.recentForm.push("W");
+            teamB.lost++;
+            teamB.recentForm.push("L");
+          } else if (match.teamAScore < match.teamBScore) {
+            teamB.won++;
+            teamB.points += 3;
+            teamB.recentForm.push("W");
+            teamA.lost++;
+            teamA.recentForm.push("L");
+          } else {
+            teamA.drawn++;
+            teamA.points += 1;
+            teamA.recentForm.push("D");
+            teamB.drawn++;
+            teamB.points += 1;
+            teamB.recentForm.push("D");
           }
         }
       });
 
       return Object.values(stats).sort((a, b) => {
+        if (b.points !== a.points) return b.points - a.points;
         const aGD = a.goalsFor - a.goalsAgainst;
         const bGD = b.goalsFor - b.goalsAgainst;
-        if (b.points !== a.points) return b.points - a.points;
         if (bGD !== aGD) return bGD - aGD;
         return b.goalsFor - a.goalsFor;
       });
     };
 
     let resultData;
-    if (Object.keys(groups).length > 1) {
-      // 다중 그룹 (ex: A조, B조)
+    if (Object.keys(groups).length > 0) {
       resultData = Object.keys(groups)
         .sort()
         .map((groupName) => ({
@@ -988,9 +1413,14 @@ exports.getLeagueStandings = async (req, res) => {
           standings: calculateStats(groups[groupName]),
         }));
     } else {
-      // 단일 그룹
+      // 매치가 없거나 그룹이 없는 경우, 모든 승인된 팀을 하나의 리스트로
       const allTeamIds = new Set(participatingTeams.map((pt) => pt.teamId));
-      resultData = calculateStats(allTeamIds);
+      resultData = [
+        {
+          groupName: "리그",
+          standings: calculateStats(allTeamIds),
+        },
+      ];
     }
 
     res.json({ success: true, data: resultData });
@@ -1052,5 +1482,189 @@ exports.getLeagueMatches = async (req, res) => {
     res
       .status(500)
       .json({ success: false, error: { message: "경기 일정 조회 실패" } });
+  }
+};
+
+// ==========================================
+// 9. [NEW] 경기 상세 정보 조회 (GET /api/tournaments/:id/matches/:matchId)
+// ==========================================
+exports.getMatchDetail_DEPRECATED = async (req, res) => {
+  const { id, matchId } = req.params; // tournamentId, matchId
+
+  try {
+    // 경기 정보 조회 (팀 정보 + ⭐️ 멤버 정보 포함)
+    const match = await prisma.match.findUnique({
+      where: { id: parseInt(matchId) },
+      include: {
+        // ⭐️ [핵심] 팀 정보 가져올 때 멤버(members)와 유저(user) 정보까지 깊게 가져오기
+        // 이게 있어야 TeamLineup에서 .map() 에러가 안 납니다!
+        teamA: {
+          include: {
+            members: {
+              include: {
+                user: {
+                  include: {
+                    profiles: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+        teamB: {
+          include: {
+            members: {
+              include: {
+                user: {
+                  include: {
+                    profiles: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+        tournament: true,
+        predictions: true,
+      },
+    });
+
+    if (!match) {
+      return res.status(404).json({
+        success: false,
+        error: { message: "경기를 찾을 수 없습니다." },
+      });
+    }
+
+    // URL의 토너먼트 ID 검증
+    if (match.tournamentId !== parseInt(id)) {
+      return res.status(400).json({
+        success: false,
+        error: { message: "해당 대회의 경기가 아닙니다." },
+      });
+    }
+
+    // 데이터 가공
+    const totalBets = match.predictions.reduce(
+      (sum, p) => sum + p.betAmount,
+      0,
+    );
+    const teamABets = match.predictions
+      .filter((p) => p.predictedTeamId === match.teamAId)
+      .reduce((sum, p) => sum + p.betAmount, 0);
+    const teamBBets = totalBets - teamABets;
+
+    // 팀 멤버 데이터를 프론트엔드 포맷(players)으로 변환하는 헬퍼 함수
+    const formatTeamPlayers = (team) => {
+      if (!team || !team.members) {
+        console.log(`[getMatchDetail] Team ${team?.id} has no members`);
+        return [];
+      }
+      return team.members.map((member) => {
+        // 해당 대회의 종목에 맞는 프로필 찾기 (없으면 첫 번째 프로필 사용)
+        const profile =
+          member.user.profiles.find(
+            (p) =>
+              p.sportType?.toLowerCase() ===
+              match.tournament.sportType?.toLowerCase(),
+          ) || member.user.profiles[0];
+
+        // [디버깅 로그] 멤버 정보 확인
+        /*
+        console.log(
+          `[getMatchDetail] Member: ${member.user.name}, SportType: ${match.tournament.sportType}, Profile Found: ${!!profile}`,
+        );
+        */
+
+        return {
+          id: member.user.id,
+          name: member.user.nickname || member.user.name,
+          position: member.position || profile?.position || "TBD",
+          champion: profile?.champions || "-",
+          tier: profile?.tier,
+        };
+      });
+    };
+
+    const teamAPlayers = match.teamA ? formatTeamPlayers(match.teamA) : [];
+    const teamBPlayers = match.teamB ? formatTeamPlayers(match.teamB) : [];
+
+    console.log(`[getMatchDetail] TeamA Players Count: ${teamAPlayers.length}`);
+    console.log(`[getMatchDetail] TeamB Players Count: ${teamBPlayers.length}`);
+
+    const data = {
+      id: match.id,
+      tournamentId: match.tournamentId,
+      tournamentName: match.tournament.name,
+      sport: match.tournament.sport,
+      round: match.roundName,
+      date: match.matchDate
+        ? new Date(match.matchDate).toISOString().split("T")[0]
+        : null,
+      time: match.matchDate
+        ? new Date(match.matchDate).toLocaleTimeString("ko-KR", {
+            hour: "2-digit",
+            minute: "2-digit",
+          })
+        : null,
+      status: match.status,
+      venue: match.venue,
+
+      // 팀 정보 (여기에 members 배열이 포함되어 나갑니다)
+      teamA: match.teamA
+        ? { ...match.teamA, players: teamAPlayers }
+        : null,
+      teamB: match.teamB
+        ? { ...match.teamB, players: teamBPlayers }
+        : null,
+      teamAScore: match.teamAScore,
+      teamBScore: match.teamBScore,
+      winnerId: match.winnerTeamId,
+
+      // 승부예측 통계
+      predictions: {
+        totalBets,
+        teamA: teamABets,
+        teamB: teamBBets,
+        teamAPercent:
+          totalBets === 0 ? 50 : Math.round((teamABets / totalBets) * 100),
+        teamBPercent:
+          totalBets === 0 ? 50 : Math.round((teamBBets / totalBets) * 100),
+      },
+
+      userPoints: 0,
+      
+      // 베팅 가능 여부 (경기 시작 전이고 상태가 UPCOMING일 때만)
+      // 날짜 비교 로직 개선: 경기 당일 포함 마감 처리 (predictionController와 로직 통일)
+      isBettingOpen: (() => {
+        if (match.status !== 'UPCOMING') return false;
+        if (!match.matchDate) return false;
+        
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        
+        const matchDate = new Date(match.matchDate);
+        matchDate.setHours(0, 0, 0, 0);
+        
+        // 오늘 날짜가 경기 날짜보다 작아야 함 (즉, 어제까지만 가능)
+        return today.getTime() < matchDate.getTime();
+      })(),
+    };
+
+    // 로그인 유저 포인트 정보 추가
+    if (req.userId) {
+      const user = await prisma.user.findUnique({
+        where: { id: req.userId },
+        select: { points: true },
+      });
+      if (user) data.userPoints = user.points;
+    }
+
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error(error);
+    res
+      .status(500)
+      .json({ success: false, error: { message: "경기 상세 조회 실패" } });
   }
 };

@@ -11,6 +11,7 @@ router.get("/:id/bracket", tournamentController.getBracket);
 router.get("/:id/standings", tournamentController.getLeagueStandings); // ⭐ 리그 순위표
 router.get("/:id/matches", tournamentController.getLeagueMatches); // ⭐ 리그 경기 일정
 router.get("/:id/participants", tournamentController.getParticipants); // ⭐ 추가
+router.get("/:id/matches/:matchId", tournamentController.getMatchDetail);
 
 // Protected: 생성, 참가, 설정(시작)
 router.post("/", verifyToken, tournamentController.createTournament);

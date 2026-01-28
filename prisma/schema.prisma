@@ -15,6 +15,7 @@ model User {
   characterImage     String?           @map("character_image_url")
   points             Int               @default(1000)
   nickname           String?           @unique
+  department         String?
   kakaoId            String?           @unique @map("kakao_id")
   googleId           String?           @unique @map("google_id")
   refreshToken       String?           @map("refresh_token")

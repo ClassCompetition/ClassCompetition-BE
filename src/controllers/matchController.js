@@ -50,6 +50,59 @@ exports.getMatchDetail = async (req, res) => {
   }
 };
 
+// ------------------------------------------------------------------
+// 🔒 Internal Helper: 다음 라운드 대진표 생성
+// ------------------------------------------------------------------
+async function _createNextRound(tx, tournamentId, winnerIds, stage) {
+  // 1. 다음 라운드 진출 팀 수
+  const teamCount = winnerIds.length;
+  
+  // 2. 더 이상 진행할 매치가 없으면 종료 (예: 결승 종료 후)
+  if (teamCount < 2) {
+    // 결승이 끝났으므로 대회 상태를 ENDED로 변경할 수도 있음
+    await tx.tournament.update({
+      where: { id: tournamentId },
+      data: { status: 'ENDED' }
+    });
+    return;
+  }
+
+  // 3. 라운드 이름 결정 (4명 -> 4강 -> 준결승, 2명 -> 결승)
+  let roundName = `${teamCount}강`;
+  if (teamCount === 2) roundName = "결승";
+  else if (teamCount === 4) roundName = "준결승";
+
+  // 4. 매치 생성
+  const matchCount = teamCount / 2;
+  
+  // 날짜 계산을 위한 기준 시간 (현재 시간 + 1일 혹은 마지막 경기 다음 날 등)
+  // 여기서는 편의상 "내일 저녁 6시" 부터 시작으로 설정
+  const baseDate = new Date();
+  baseDate.setDate(baseDate.getDate() + 1);
+  baseDate.setHours(18, 0, 0, 0);
+
+  const matchesToCreate = [];
+
+  for (let i = 0; i < matchCount; i++) {
+    const teamAId = winnerIds[i * 2];
+    const teamBId = winnerIds[i * 2 + 1];
+
+    const matchDate = new Date(baseDate.getTime() + i * 60 * 60 * 1000); // 1시간 간격
+
+    matchesToCreate.push({
+      tournamentId,
+      stage,
+      roundName,
+      teamAId,
+      teamBId,
+      status: "UPCOMING",
+      matchDate
+    });
+  }
+
+  await tx.match.createMany({ data: matchesToCreate });
+}
+
 // ==========================================
 // 2. 경기 결과 입력 (PUT /api/matches/:id/score)
 // ==========================================
@@ -69,65 +122,89 @@ exports.updateScore = async (req, res) => {
         return res.status(403).json({ success: false, error: { message: "권한이 없습니다." } });
     }
 
-    // 트랜잭션으로 결과 저장 + 포인트 정산 처리
+    let nextRoundCreated = false;
+
+    // 트랜잭션으로 결과 저장 + 포인트 정산 처리 + 다음 라운드 생성
     await prisma.$transaction(async (tx) => {
         // 1. 경기 결과 업데이트
-        await tx.match.update({
+        const updatedMatch = await tx.match.update({
           where: { id: parseInt(id) },
           data: {
             teamAScore, teamBScore, winnerTeamId, status: status || 'DONE'
           }
         });
 
-        // 2. 경기가 끝났다면('DONE'), 베팅 정산 시작
+        // 2. 경기가 끝났다면('DONE'), 베팅 정산
         if (status === 'DONE' && winnerTeamId) {
-            // 해당 경기의 모든 예측 가져오기
+            // ... (베팅 정산 로직 유지) ...
             const predictions = await tx.prediction.findMany({
                 where: { matchId: parseInt(id), status: 'pending' }
             });
 
-            // 전체 베팅 금액 (배당률 계산용)
             const totalPot = predictions.reduce((sum, p) => sum + p.betAmount, 0);
-            // 승리 팀에 건 총 금액
             const winningPot = predictions
                 .filter(p => p.predictedTeamId === winnerTeamId)
                 .reduce((sum, p) => sum + p.betAmount, 0);
 
-            // 배당률 (승리한 사람이 없으면 1배 - 즉 원금만? 혹은 시스템 룰에 따름. 여기선 단순화)
-            // (간단 로직: 전체 판돈 / 승리 팀 판돈)
             let multiplier = winningPot > 0 ? totalPot / winningPot : 1;
             
-            // 수수료 떼기? (예: 90%만 지급) -> 여기선 생략하고 100% 지급
-
             for (const p of predictions) {
                 if (p.predictedTeamId === winnerTeamId) {
-                    // 승리: 배당금 지급
                     const payout = Math.floor(p.betAmount * multiplier);
-                    
-                    // 1) 예측 상태 업데이트
                     await tx.prediction.update({
                         where: { id: p.id },
                         data: { status: 'won', payout }
                     });
-                    
-                    // 2) 유저 포인트 지급
                     await tx.user.update({
                         where: { id: p.userId },
                         data: { points: { increment: payout } }
                     });
-
                 } else {
-                    // 패배: 상태만 업데이트
                     await tx.prediction.update({
                         where: { id: p.id },
                         data: { status: 'lost', payout: 0 }
                     });
                 }
             }
+
+            // ⭐️ [추가] 다음 라운드 진출 로직
+            // 현재 라운드의 모든 경기가 끝났는지 확인
+            const currentRoundMatches = await tx.match.findMany({
+              where: {
+                tournamentId: match.tournamentId,
+                roundName: match.roundName, // 예: "4강"
+                stage: match.stage // 예: "TOURNAMENT"
+              },
+              orderBy: { id: 'asc' } // 대진표 순서대로 정렬 가정
+            });
+
+            const allFinished = currentRoundMatches.every(m => m.status === 'DONE');
+
+            if (allFinished) {
+              // 승자들 수집 (대진표 순서대로)
+              const winners = currentRoundMatches.map(m => m.winnerTeamId);
+              
+              // 다음 라운드 생성
+              if (winners.length >= 2) {
+                 await _createNextRound(tx, match.tournamentId, winners, match.stage);
+                 nextRoundCreated = true;
+              } else if (winners.length === 1) {
+                 // 결승 종료 -> 대회 종료 처리
+                 await tx.tournament.update({
+                   where: { id: match.tournamentId },
+                   data: { status: 'ENDED' }
+                 });
+              }
+            }
         }
     });
 
-    res.json({ success: true, message: "경기 결과 저장 및 포인트 정산 완료." });
+    res.json({ 
+      success: true, 
+      message: nextRoundCreated 
+        ? "경기 결과 저장 완료. 다음 라운드 대진표가 생성되었습니다!" 
+        : "경기 결과 저장 및 포인트 정산 완료." 
+    });
 
   } catch (error) {
     console.error(error);

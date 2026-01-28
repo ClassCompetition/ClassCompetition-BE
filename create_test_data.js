@@ -1,115 +1,49 @@
+// force_reset_je_bal.js
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log("🚀 테스트 데이터 생성을 시작합니다...");
+  console.log("🔄 '제발' 대회 강제 초기화를 시작합니다...");
 
-  // 1. 대회 찾기
-  let tournament = await prisma.tournament.findFirst({
-    where: { name: { contains: "ㅎㅇㅎㅇㄴ" } },
+  // 1. 이름으로 대회 찾기
+  const tournament = await prisma.tournament.findFirst({
+    where: { name: "제발" },
   });
 
   if (!tournament) {
-    console.log('ℹ️ "ㅎㅇㅎㅇㄴ" 대회를 찾을 수 없어 새로 생성합니다.');
-    // 관리자(매점빵) 찾기 - 없으면 첫 번째 유저로
-    const manager = await prisma.user.findFirst();
-    if (!manager) {
-      console.error("❌ 유저가 하나도 없습니다. 먼저 회원가입을 진행해주세요.");
-      return;
-    }
-
-    tournament = await prisma.tournament.create({
-      data: {
-        name: "ㅎㅇㅎㅇㄴ",
-        status: "UPCOMING",
-        managerId: manager.id,
-        sport: "LoL",
-        sportType: "lol",
-        description: "테스트용 대회입니다.",
-        targetTeamCount: 8,
-        groupCount: 0,
-      },
-    });
+    console.error("❌ '제발'이라는 이름의 대회를 찾을 수 없습니다.");
+    return;
   }
 
-  console.log(`✅ 대회 ID: ${tournament.id}, 이름: ${tournament.name}`);
+  console.log(
+    `✅ 대회를 찾았습니다: [ID: ${tournament.id}] ${tournament.name} (현재 상태: ${tournament.status})`,
+  );
 
-  // 2. 테스트 팀 생성 데이터
-  const testTeams = [
-    { name: "T1 Academy", description: "T1 아카데미 팀입니다." },
-    { name: "Gen.G Academy", description: "Gen.G 아카데미 팀입니다." },
-    { name: "DK Challengers", description: "DK 챌린저스입니당" },
-    { name: "KT Rolster B", description: "KT 2군" },
-    { name: "HLE B", description: "한화생명 2군" },
-  ];
+  // 2. 관련 매치(경기) 데이터 모두 삭제
+  const deletedMatches = await prisma.match.deleteMany({
+    where: { tournamentId: tournament.id },
+  });
+  console.log(
+    `🗑️ 연관된 경기 데이터 ${deletedMatches.count}개를 삭제했습니다.`,
+  );
 
-  for (const teamData of testTeams) {
-    // 팀 존재 확인
-    let team = await prisma.team.findFirst({
-      where: { name: teamData.name },
-    });
+  // 3. 대회 상태를 '모집 중(RECRUITING)'으로 변경
+  // (만약 예정 상태를 원하시면 status: 'UPCOMING'으로 변경하세요)
+  const updatedTournament = await prisma.tournament.update({
+    where: { id: tournament.id },
+    data: {
+      status: "RECRUITING", // 모집 중으로 변경 (참가 신청 가능 상태)
+      bracketGeneration: null, // 대진표 생성 방식 초기화
+      startDate: new Date(), // 시작일 오늘로 갱신 (선택사항)
+    },
+  });
 
-    if (!team) {
-      // 리더 유저 생성
-      const timestamp = Date.now();
-      const user = await prisma.user.create({
-        data: {
-          email: `test_${timestamp}_${Math.random()}@example.com`,
-          name: `User_${teamData.name.replace(/\s/g, "")}`,
-          passwordHash: "dummy",
-          nickname: `N_${teamData.name.replace(/\s/g, "")}`,
-        },
-      });
-
-      // 팀 생성
-      team = await prisma.team.create({
-        data: {
-          name: teamData.name,
-          sport: "LoL",
-          sportType: "lol",
-          description: teamData.description,
-          inviteCode: `CODE_${timestamp}_${Math.random().toString(36).substring(7)}`,
-          members: {
-            create: {
-              userId: user.id,
-              role: "leader",
-              position: "MID",
-            },
-          },
-        },
-      });
-      console.log(`✅ 팀 생성 완료: ${team.name} (ID: ${team.id})`);
-    } else {
-      console.log(`ℹ️ 팀 이미 존재: ${team.name} (ID: ${team.id})`);
-    }
-
-    // 3. 참가 신청 (PENDING)
-    const existingParticipation = await prisma.tournamentTeam.findUnique({
-      where: {
-        tournamentId_teamId: {
-          tournamentId: tournament.id,
-          teamId: team.id,
-        },
-      },
-    });
-
-    if (!existingParticipation) {
-      await prisma.tournamentTeam.create({
-        data: {
-          tournamentId: tournament.id,
-          teamId: team.id,
-          status: "PENDING", // 대기 상태
-        },
-      });
-      console.log(`   👉 참가 신청 완료 (PENDING): ${team.name}`);
-    } else {
-      console.log(
-        `   ℹ️ 이미 참가 신청됨: ${team.name} (상태: ${existingParticipation.status})`,
-      );
-    }
-  }
-
-  console.log("\n🎉 모든 작업이 완료되었습니다!");
+  console.log(
+    `✨ 초기화 완료! 대회 상태가 '${updatedTournament.status}'으로 변경되었습니다.`,
+  );
+  console.log(
+    "👉 웹사이트에서 새로고침(F5) 후 '참가 신청' 버튼이 뜨는지 확인해보세요.",
+  );
 }
 
 main()
