@@ -17,6 +17,7 @@ const userRouter = require('./routes/userRouter');
 const tacticRouter = require('./routes/tacticRouter');
 const predictionRouter = require('./routes/predictionRouter'); 
 const uploadRouter = require('./routes/uploadRouter');
+const riotRouter = require('./routes/riotRouter');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -38,6 +39,7 @@ app.use('/api/matches', matchRouter);          // 경기 관련
 app.use('/api/tactics', tacticRouter);         // 전술판
 app.use('/api/predictions', predictionRouter); // 승부예측
 app.use('/api/upload', uploadRouter);          // 업로드
+app.use('/api/riot', riotRouter);
 
 // 헬스 체크
 app.get('/', (req, res) => {

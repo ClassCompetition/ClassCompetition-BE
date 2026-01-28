@@ -21,6 +21,7 @@
   "homepage": "https://github.com/ClassCompetition/ClassCompetition-BE#readme",
   "dependencies": {
     "@prisma/client": "^5.19.1",
+    "axios": "^1.13.4",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.2.3",
