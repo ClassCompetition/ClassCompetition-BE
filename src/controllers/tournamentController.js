@@ -83,7 +83,13 @@ exports.getAllTournaments = async (req, res) => {
       take: 10,
       skip: (parseInt(page) - 1) * 10,
       include: {
-        _count: { select: { participatingTeams: true } },
+        _count: {
+          select: {
+            participatingTeams: {
+              where: { status: "APPROVED" },
+            },
+          },
+        },
       },
     });
 
@@ -120,6 +126,7 @@ exports.getTournamentDetail = async (req, res) => {
       where: { id: parseInt(id) },
       include: {
         participatingTeams: {
+          where: { status: "APPROVED" },
           include: { team: true },
         },
       },
@@ -132,37 +139,37 @@ exports.getTournamentDetail = async (req, res) => {
 
     // ⭐️ 우승자 정보 조회 (결승전이 끝났다면 상태와 무관하게 우승자 표시)
     let winnerId = null;
-    
+
     // 1. '결승' 라운드 매치 찾기
     const finalMatch = await prisma.match.findFirst({
-        where: {
-            tournamentId: parseInt(id),
-            stage: 'TOURNAMENT', // 토너먼트 스테이지여야 함
-            roundName: '결승', // 명시적으로 결승전 찾기
-            status: 'DONE'
-        }
+      where: {
+        tournamentId: parseInt(id),
+        stage: "TOURNAMENT", // 토너먼트 스테이지여야 함
+        roundName: "결승", // 명시적으로 결승전 찾기
+        status: "DONE",
+      },
     });
 
     if (finalMatch && finalMatch.winnerTeamId) {
-        winnerId = finalMatch.winnerTeamId;
+      winnerId = finalMatch.winnerTeamId;
     } else {
-        // 2. 결승전 이름이 다르거나 못 찾았을 경우, 가장 마지막에 완료된 토너먼트 매치 확인
-        // (단, 2강(결승)이 아닐 수도 있으니 주의 필요하지만, 기존 로직 보완 차원)
-        const lastMatch = await prisma.match.findFirst({
-            where: {
-                tournamentId: parseInt(id),
-                stage: 'TOURNAMENT',
-                status: 'DONE'
-            },
-            orderBy: { id: 'desc' }
-        });
-        
-        // 마지막 매치가 있고, 그것이 결승전일 가능성이 높음 (가장 나중에 생성/완료됨)
-        if (lastMatch && lastMatch.winnerTeamId) {
-            // 추가 검증: 이 매치가 정말 마지막 라운드인지 확인하려면 전체 라운드 구조를 봐야 하지만,
-            // 보통 결승전이 가장 마지막 id를 가짐.
-             winnerId = lastMatch.winnerTeamId;
-        }
+      // 2. 결승전 이름이 다르거나 못 찾았을 경우, 가장 마지막에 완료된 토너먼트 매치 확인
+      // (단, 2강(결승)이 아닐 수도 있으니 주의 필요하지만, 기존 로직 보완 차원)
+      const lastMatch = await prisma.match.findFirst({
+        where: {
+          tournamentId: parseInt(id),
+          stage: "TOURNAMENT",
+          status: "DONE",
+        },
+        orderBy: { id: "desc" },
+      });
+
+      // 마지막 매치가 있고, 그것이 결승전일 가능성이 높음 (가장 나중에 생성/완료됨)
+      if (lastMatch && lastMatch.winnerTeamId) {
+        // 추가 검증: 이 매치가 정말 마지막 라운드인지 확인하려면 전체 라운드 구조를 봐야 하지만,
+        // 보통 결승전이 가장 마지막 id를 가짐.
+        winnerId = lastMatch.winnerTeamId;
+      }
     }
 
     res.json({
@@ -696,12 +703,8 @@ exports.getMatchDetail = async (req, res) => {
       venue: match.venue,
 
       // 팀 정보
-      teamA: match.teamA
-        ? { ...match.teamA, players: teamAPlayers }
-        : null,
-      teamB: match.teamB
-        ? { ...match.teamB, players: teamBPlayers }
-        : null,
+      teamA: match.teamA ? { ...match.teamA, players: teamAPlayers } : null,
+      teamB: match.teamB ? { ...match.teamB, players: teamBPlayers } : null,
       teamAScore: match.teamAScore,
       teamBScore: match.teamBScore,
       winnerId: match.winnerTeamId,
@@ -718,19 +721,19 @@ exports.getMatchDetail = async (req, res) => {
       },
 
       userPoints: 0,
-      
+
       // 베팅 가능 여부 (경기 시작 전이고 상태가 UPCOMING일 때만)
       // 날짜 비교 로직 개선: 경기 당일 포함 마감 처리 (predictionController와 로직 통일)
       isBettingOpen: (() => {
-        if (match.status !== 'UPCOMING') return false;
+        if (match.status !== "UPCOMING") return false;
         if (!match.matchDate) return false;
-        
+
         const today = new Date();
         today.setHours(0, 0, 0, 0);
-        
+
         const matchDate = new Date(match.matchDate);
         matchDate.setHours(0, 0, 0, 0);
-        
+
         // 오늘 날짜가 경기 날짜보다 작아야 함 (즉, 어제까지만 가능)
         return today.getTime() < matchDate.getTime();
       })(),
@@ -824,7 +827,6 @@ function getValidDateRange(startDateStr, endDateStr) {
 
   return { start: effectiveStart, end: effectiveEnd };
 }
-
 
 function calculateMatchDate(startDate, endDate, matchIndex, totalMatches) {
   const start = startDate.getTime();
@@ -980,14 +982,14 @@ async function _createTournamentBracket(tournamentId, teamIds, stage) {
       // 리그 일정이 없으면 오늘부터
       baseDate = new Date();
     }
-  } 
+  }
   // 2. 일반 토너먼트이거나 시작일이 없거나 이미 지난 경우: 오늘부터
   else if (
     !tournament.startDate ||
     new Date(tournament.startDate) < new Date()
   ) {
     baseDate = new Date();
-  } 
+  }
   // 3. 미래 시작일이 있는 경우
   else {
     baseDate = new Date(tournament.startDate);
@@ -1611,12 +1613,8 @@ exports.getMatchDetail_DEPRECATED = async (req, res) => {
       venue: match.venue,
 
       // 팀 정보 (여기에 members 배열이 포함되어 나갑니다)
-      teamA: match.teamA
-        ? { ...match.teamA, players: teamAPlayers }
-        : null,
-      teamB: match.teamB
-        ? { ...match.teamB, players: teamBPlayers }
-        : null,
+      teamA: match.teamA ? { ...match.teamA, players: teamAPlayers } : null,
+      teamB: match.teamB ? { ...match.teamB, players: teamBPlayers } : null,
       teamAScore: match.teamAScore,
       teamBScore: match.teamBScore,
       winnerId: match.winnerTeamId,
@@ -1633,19 +1631,19 @@ exports.getMatchDetail_DEPRECATED = async (req, res) => {
       },
 
       userPoints: 0,
-      
+
       // 베팅 가능 여부 (경기 시작 전이고 상태가 UPCOMING일 때만)
       // 날짜 비교 로직 개선: 경기 당일 포함 마감 처리 (predictionController와 로직 통일)
       isBettingOpen: (() => {
-        if (match.status !== 'UPCOMING') return false;
+        if (match.status !== "UPCOMING") return false;
         if (!match.matchDate) return false;
-        
+
         const today = new Date();
         today.setHours(0, 0, 0, 0);
-        
+
         const matchDate = new Date(match.matchDate);
         matchDate.setHours(0, 0, 0, 0);
-        
+
         // 오늘 날짜가 경기 날짜보다 작아야 함 (즉, 어제까지만 가능)
         return today.getTime() < matchDate.getTime();
       })(),
